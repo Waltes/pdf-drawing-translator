@@ -1,0 +1,16 @@
+# 统一换行符：源码用 LF（跨平台），批处理必须是 CRLF，否则 cmd 解析出错
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.iss text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.spec text eol=lf
+*.txt text eol=lf
+
+# 二进制文件不要让 git 做任何转换（转了就损坏）
+*.pdf binary
+*.png binary
+*.ico binary
+*.wav binary
+*.exe binary

@@ -1,0 +1,669 @@
+﻿中文,English,分类
+图号,DWG NO.,标题栏
+图纸编号,DRAWING NO.,标题栏
+比例,SCALE,标题栏
+材质,MATERIAL,标题栏
+材料,MATERIAL,标题栏
+数量,QTY,标题栏
+重量,WEIGHT,标题栏
+单位,UNIT,标题栏
+名称,DESCRIPTION,标题栏
+品名,DESCRIPTION,标题栏
+规格,SPECIFICATION,标题栏
+型号,MODEL,标题栏
+设计,DESIGNED BY,标题栏
+制图,DRAWN BY,标题栏
+绘图,DRAWN BY,标题栏
+审核,CHECKED BY,标题栏
+校对,CHECKED BY,标题栏
+批准,APPROVED BY,标题栏
+日期,DATE,标题栏
+版本,REV.,标题栏
+版次,REVISION,标题栏
+版本号,REV. NO.,标题栏
+更改标记,REV. MARK,标题栏
+变更记录,REVISION HISTORY,标题栏
+图纸, DRAWING,标题栏
+总图,GENERAL ASSEMBLY,标题栏
+装配图,ASSEMBLY DRAWING,标题栏
+零件图,PART DRAWING,标题栏
+部件图,COMPONENT DRAWING,标题栏
+爆炸图,EXPLODED VIEW,标题栏
+示意图,SCHEMATIC,标题栏
+外形图,OUTLINE DRAWING,标题栏
+包装图,PACKING DRAWING,标题栏
+明细表,PARTS LIST,标题栏
+物料清单,BOM,标题栏
+序号,ITEM NO.,标题栏
+编号,ITEM NO.,标题栏
+备注,REMARK,标题栏
+说明,NOTE,标题栏
+客户,CUSTOMER,标题栏
+项目,PROJECT,标题栏
+共几页,SHEET,标题栏
+页次,SHEET NO.,标题栏
+第一角投影,FIRST ANGLE PROJECTION,标题栏
+第三角投影,THIRD ANGLE PROJECTION,标题栏
+未注公差,UNSPECIFIED TOLERANCE,标题栏
+技术要求,TECHNICAL REQUIREMENTS,标题栏
+技术条件,TECHNICAL SPECIFICATION,标题栏
+检验标准,INSPECTION STANDARD,标题栏
+质量要求,QUALITY REQUIREMENT,标题栏
+主视图,FRONT VIEW,视图
+正视图,FRONT VIEW,视图
+俯视图,TOP VIEW,视图
+仰视图,BOTTOM VIEW,视图
+左视图,LEFT VIEW,视图
+右视图,RIGHT VIEW,视图
+后视图,REAR VIEW,视图
+侧视图,SIDE VIEW,视图
+剖视图,SECTION VIEW,视图
+剖面图,SECTION VIEW,视图
+全剖视图,FULL SECTION,视图
+半剖视图,HALF SECTION,视图
+局部剖视图,PARTIAL SECTION,视图
+旋转剖视图,ALIGNED SECTION,视图
+断面图,SECTION,视图
+局部放大图,DETAIL VIEW,视图
+放大图,DETAIL VIEW,视图
+轴测图,ISOMETRIC VIEW,视图
+展开图,FLAT PATTERN,视图
+展开料,FLAT BLANK,视图
+向视图,VIEW,视图
+斜视图,AUXILIARY VIEW,视图
+内部结构,INTERNAL STRUCTURE,视图
+隐藏线,HIDDEN LINE,视图
+中心线,CENTER LINE,视图
+轮廓线,OUTLINE,视图
+虚线,HIDDEN LINE,视图
+尺寸,DIMENSION,尺寸公差
+基本尺寸,BASIC DIMENSION,尺寸公差
+名义尺寸,NOMINAL SIZE,尺寸公差
+实际尺寸,ACTUAL SIZE,尺寸公差
+极限尺寸,LIMIT SIZE,尺寸公差
+最大极限尺寸,MAXIMUM LIMIT,尺寸公差
+最小极限尺寸,MINIMUM LIMIT,尺寸公差
+上偏差,UPPER DEVIATION,尺寸公差
+下偏差,LOWER DEVIATION,尺寸公差
+偏差,DEVIATION,尺寸公差
+公差,TOLERANCE,尺寸公差
+公差带,TOLERANCE ZONE,尺寸公差
+配合,FIT,尺寸公差
+间隙配合,CLEARANCE FIT,尺寸公差
+过盈配合,INTERFERENCE FIT,尺寸公差
+过渡配合,TRANSITION FIT,尺寸公差
+基孔制,HOLE-BASIS SYSTEM,尺寸公差
+基轴制,SHAFT-BASIS SYSTEM,尺寸公差
+最大实体尺寸,MMC,尺寸公差
+最小实体尺寸,LMC,尺寸公差
+中心距,CENTER DISTANCE,尺寸公差
+孔距,HOLE SPACING,尺寸公差
+分度圆直径,PCD,尺寸公差
+节圆直径,PITCH CIRCLE DIA.,尺寸公差
+内径,INNER DIA.,尺寸公差
+外径,OUTER DIA.,尺寸公差
+直径,DIA.,尺寸公差
+半径,RADIUS,尺寸公差
+厚度,THICKNESS,尺寸公差
+宽度,WIDTH,尺寸公差
+高度,HEIGHT,尺寸公差
+长度,LENGTH,尺寸公差
+深度,DEPTH,尺寸公差
+角度,ANGLE,尺寸公差
+倒角,CHAMFER,尺寸公差
+圆角,FILLET,尺寸公差
+折弯半径,BEND RADIUS,尺寸公差
+板厚,PLATE THICKNESS,尺寸公差
+螺纹,THREAD,尺寸公差
+内螺纹,INTERNAL THREAD,尺寸公差
+外螺纹,EXTERNAL THREAD,尺寸公差
+螺距,PITCH,尺寸公差
+粗牙,COARSE THREAD,尺寸公差
+细牙,FINE THREAD,尺寸公差
+通孔,THROUGH HOLE,尺寸公差
+盲孔,BLIND HOLE,尺寸公差
+沉孔,COUNTERBORE,尺寸公差
+埋头孔,COUNTERSINK,尺寸公差
+锪平,SPOTFACE,尺寸公差
+钻孔,DRILL,尺寸公差
+铰孔,REAM,尺寸公差
+攻丝,TAP,尺寸公差
+键槽,KEYWAY,尺寸公差
+销孔,PIN HOLE,尺寸公差
+锥度,TAPER,尺寸公差
+斜度,SLOPE,尺寸公差
+平行度,PARALLELISM,尺寸公差
+垂直度,PERPENDICULARITY,尺寸公差
+同轴度,COAXIALITY,尺寸公差
+圆度,ROUNDNESS,尺寸公差
+圆柱度,CYLINDRICITY,尺寸公差
+平面度,FLATNESS,尺寸公差
+直线度,STRAIGHTNESS,尺寸公差
+跳动,RUNOUT,尺寸公差
+位置度,POSITION,尺寸公差
+对称度,SYMMETRY,尺寸公差
+轮廓度,PROFILE,尺寸公差
+表面粗糙度,SURFACE ROUGHNESS,表面处理
+表面处理,SURFACE TREATMENT,表面处理
+处理,TREATMENT,表面处理
+剖视,SECTION,视图
+剖切,SECTION,视图
+粗糙度,ROUGHNESS,表面处理
+未注粗糙度,UNSPECIFIED ROUGHNESS,表面处理
+镀锌,ZINC PLATED,表面处理
+电镀锌,ELECTRO-GALVANIZED,表面处理
+热浸锌,HOT DIP GALVANIZED,表面处理
+镀镍,NICKEL PLATED,表面处理
+镀铬,CHROME PLATED,表面处理
+镀锡,TIN PLATED,表面处理
+阳极氧化,ANODIZED,表面处理
+黑色阳极氧化,BLACK ANODIZED,表面处理
+本色阳极氧化,CLEAR ANODIZED,表面处理
+硬质氧化,HARD ANODIZED,表面处理
+喷涂,POWDER COATING,表面处理
+喷塑,POWDER COATING,表面处理
+喷漆,PAINTING,表面处理
+喷砂,SAND BLASTING,表面处理
+抛丸,SHOT BLASTING,表面处理
+抛光,POLISHING,表面处理
+拉丝,BRUSHED,表面处理
+磨砂,FROSTED,表面处理
+镜面,MIRROR FINISH,表面处理
+钝化,PASSIVATION,表面处理
+磷化,PHOSPHATING,表面处理
+发黑,BLACK OXIDE,表面处理
+电泳,E-COATING,表面处理
+去毛刺,DEBURRING,表面处理
+清洗,CLEANING,表面处理
+防锈,RUST PREVENTION,表面处理
+防锈油,ANTI-RUST OIL,表面处理
+无划痕,NO SCRATCH,表面处理
+无毛刺,NO BURR,表面处理
+色泽均匀,UNIFORM COLOR,表面处理
+颜色,COLOR,表面处理
+色号,COLOR CODE,表面处理
+不锈钢,STAINLESS STEEL,材料
+碳钢,CARBON STEEL,材料
+冷轧板,COLD ROLLED STEEL,材料
+热轧板,HOT ROLLED STEEL,材料
+镀锌板,GALVANIZED STEEL,材料
+铝板,ALUMINUM SHEET,材料
+铝型材,ALUMINUM PROFILE,材料
+铝合金,ALUMINUM ALLOY,材料
+黄铜,BRASS,材料
+紫铜,COPPER,材料
+青铜,BRONZE,材料
+铸铁,CAST IRON,材料
+球墨铸铁,DUCTILE IRON,材料
+铸铝,CAST ALUMINUM,材料
+锌合金,ZINC ALLOY,材料
+弹簧钢,SPRING STEEL,材料
+工具钢,TOOL STEEL,材料
+尼龙,NYLON,材料
+聚甲醛,POM,材料
+聚丙烯,POLYPROPYLENE,材料
+聚乙烯,POLYETHYLENE,材料
+高密度聚乙烯,HDPE,材料
+低密度聚乙烯,LDPE,材料
+聚碳酸酯,POLYCARBONATE,材料
+聚氯乙烯,PVC,材料
+丙烯腈丁二烯苯乙烯,ABS,材料
+亚克力,ACRYLIC,材料
+聚酯,PET,材料
+橡胶,RUBBER,材料
+硅胶,SILICONE,材料
+三元乙丙橡胶,EPDM,材料
+热塑性橡胶,TPR,材料
+玻璃纤维,GLASS FIBER,材料
+玻纤增强,GLASS FIBER REINFORCED,材料
+食品级,FOOD GRADE,材料
+医疗级,MEDICAL GRADE,材料
+阻燃,FLAME RETARDANT,材料
+抗紫外线,UV RESISTANT,材料
+全新料,VIRGIN MATERIAL,材料
+回料,RECYCLED MATERIAL,材料
+母粒,MASTERBATCH,材料
+焊接,WELDING,工艺
+点焊,SPOT WELDING,工艺
+满焊,FULL WELD,工艺
+连续焊,CONTINUOUS WELD,工艺
+断续焊,INTERMITTENT WELD,工艺
+氩弧焊,TIG WELDING,工艺
+二保焊,MIG WELDING,工艺
+激光焊,LASER WELDING,工艺
+超声波焊接,ULTRASONIC WELDING,工艺
+焊缝,WELD SEAM,工艺
+焊后打磨,GRIND AFTER WELDING,工艺
+铆接,RIVETING,工艺
+折弯,BENDING,工艺
+冲压,STAMPING,工艺
+拉伸,DRAWING,工艺
+注塑,INJECTION MOLDING,工艺
+吹塑,BLOW MOLDING,工艺
+挤出,EXTRUSION,工艺
+吸塑,VACUUM FORMING,工艺
+滚塑,ROTATIONAL MOLDING,工艺
+模压,COMPRESSION MOLDING,工艺
+机加工,MACHINING,工艺
+车削,TURNING,工艺
+铣削,MILLING,工艺
+磨削,GRINDING,工艺
+线切割,WIRE CUTTING,工艺
+激光切割,LASER CUTTING,工艺
+水刀切割,WATERJET CUTTING,工艺
+等离子切割,PLASMA CUTTING,工艺
+剪板,SHEARING,工艺
+冲孔,PUNCHING,工艺
+攻牙,TAPPING,工艺
+装配,ASSEMBLY,工艺
+拆卸,DISASSEMBLY,工艺
+组装,ASSEMBLY,工艺
+压装,PRESS FIT,工艺
+热处理,HEAT TREATMENT,热处理
+淬火,QUENCHING,热处理
+回火,TEMPERING,热处理
+退火,ANNEALING,热处理
+正火,NORMALIZING,热处理
+渗碳,CARBURIZING,热处理
+调质,QUENCHING AND TEMPERING,热处理
+高频淬火,INDUCTION HARDENING,热处理
+氮化,NITRIDING,热处理
+硬度,HARDNESS,热处理
+表面硬度,SURFACE HARDNESS,热处理
+洛氏硬度,HRC,热处理
+布氏硬度,HB,热处理
+维氏硬度,HV,热处理
+螺栓,BOLT,紧固件
+螺钉,SCREW,紧固件
+螺丝,SCREW,紧固件
+螺母,NUT,紧固件
+垫圈,WASHER,紧固件
+平垫圈,FLAT WASHER,紧固件
+弹簧垫圈,SPRING WASHER,紧固件
+垫片,GASKET,紧固件
+销,PIN,紧固件
+圆柱销,DOWEL PIN,紧固件
+开口销,COTTER PIN,紧固件
+挡圈,RETAINING RING,紧固件
+卡簧,RETAINING RING,紧固件
+轴承,BEARING,紧固件
+密封圈,SEAL RING,紧固件
+油封,OIL SEAL,紧固件
+弹簧,SPRING,紧固件
+拉铆螺母,RIVET NUT,紧固件
+自攻螺丝,SELF-TAPPING SCREW,紧固件
+沉头螺丝,COUNTERSUNK SCREW,紧固件
+内六角螺钉,SOCKET HEAD CAP SCREW,紧固件
+六角螺栓,HEX BOLT,紧固件
+马车螺栓,CARRIAGE BOLT,紧固件
+膨胀螺栓,EXPANSION BOLT,紧固件
+法兰,FLANGE,管路阀门
+法兰盘,FLANGE PLATE,管路阀门
+法兰面,FLANGE FACE,管路阀门
+管件,PIPE FITTING,管路阀门
+三通,TEE,管路阀门
+弯头,ELBOW,管路阀门
+异径管,REDUCER,管路阀门
+直接头,COUPLING,管路阀门
+活接头,UNION,管路阀门
+阀门,VALVE,管路阀门
+球阀,BALL VALVE,管路阀门
+闸阀,GATE VALVE,管路阀门
+蝶阀,BUTTERFLY VALVE,管路阀门
+止回阀,CHECK VALVE,管路阀门
+截止阀,GLOBE VALVE,管路阀门
+阀体,VALVE BODY,管路阀门
+阀盖,VALVE COVER,管路阀门
+阀杆,VALVE STEM,管路阀门
+密封面,SEALING FACE,管路阀门
+管道,PIPE,管路阀门
+管径,PIPE DIA.,管路阀门
+壁厚,WALL THICKNESS,管路阀门
+卡箍,CLAMP,管路阀门
+抱箍,U-BOLT CLAMP,管路阀门
+接头,CONNECTOR,管路阀门
+快接,QUICK CONNECTOR,管路阀门
+注塑件,INJECTION PART,通用
+冲压件,STAMPED PART,通用
+机加件,MACHINED PART,通用
+钣金件,SHEET METAL PART,通用
+焊接件,WELDED PART,通用
+铸件,CASTING,通用
+锻件,FORGING,通用
+标准件,STANDARD PART,通用
+外协件,OUTSOURCED PART,通用
+半成品,SEMI-FINISHED,通用
+成品,FINISHED PRODUCT,通用
+样品,SAMPLE,通用
+样件,PROTOTYPE,通用
+批量,PRODUCTION,通用
+首件,FIRST ARTICLE,通用
+模具,MOLD,通用
+工装,FIXTURE,通用
+治具,JIG,通用
+检具,GAUGE,通用
+包装,PACKAGING,通用
+纸箱,CARTON,通用
+托盘,PALLET,通用
+木箱,WOODEN CASE,通用
+标识,LABEL,通用
+标签,LABEL,通用
+打包带,STRAPPING,通用
+缠绕膜,STRETCH FILM,通用
+合格,QUALIFIED,通用
+不合格,REJECTED,通用
+返工,REWORK,通用
+报废,SCRAP,通用
+检验,INSPECTION,通用
+抽检,SAMPLING INSPECTION,通用
+全检,FULL INSPECTION,通用
+外观,APPEARANCE,通用
+功能,FUNCTION,通用
+尺寸检验,DIMENSIONAL CHECK,通用
+性能,PERFORMANCE,通用
+承重,LOAD CAPACITY,通用
+载重,LOAD CAPACITY,通用
+静载,STATIC LOAD,通用
+动载,DYNAMIC LOAD,通用
+堆码,STACKING,通用
+跌落,DROP TEST,通用
+试验,TEST,通用
+配合间隙,ASSEMBLY CLEARANCE,通用
+转动灵活,ROTATE FREELY,通用
+无卡滞,NO JAMMING,通用
+不松动,NO LOOSENESS,通用
+密封良好,GOOD SEALING,通用
+无渗漏,NO LEAKAGE,通用
+无变形,NO DEFORMATION,通用
+无裂纹,NO CRACK,通用
+无气泡,NO BUBBLE,通用
+无缩水,NO SINK MARK,通用
+无飞边,NO FLASH,通用
+无缺料,NO SHORT SHOT,通用
+无杂质,NO IMPURITY,通用
+无油污,NO OIL STAIN,通用
+无锈迹,NO RUST,通用
+锐边倒钝,SHARP EDGES DEBURRED,整句
+锐边倒圆,SHARP EDGES ROUNDED,整句
+去毛刺，不允许有锐边,DEBURR ALL SHARP EDGES,整句
+未注圆角,UNDEFINED FILLET,整句
+未注圆角为,UNDEFINED FILLETS,整句
+未注倒角,UNDEFINED CHAMFER,整句
+未注尺寸公差按,UNSPECIFIED TOLERANCES PER,整句
+未注公差按,UNSPECIFIED TOLERANCES PER,整句
+未注表面粗糙度,UNSPECIFIED SURFACE ROUGHNESS,整句
+表面不允许有划痕,NO SCRATCH ON SURFACE,整句
+表面不允许有气泡,NO BUBBLE ON SURFACE,整句
+表面无飞边,NO FLASH ON SURFACE,整句
+表面平整,FLAT SURFACE,整句
+表面光洁,SMOOTH SURFACE,整句
+零件应无变形,PARTS SHALL BE FREE OF DEFORMATION,整句
+装配后转动灵活,SHALL ROTATE FREELY AFTER ASSEMBLY,整句
+装配后无卡滞,NO JAMMING AFTER ASSEMBLY,整句
+未注壁厚,UNDEFINED WALL THICKNESS,整句
+所有尺寸单位为毫米,ALL DIMENSIONS IN MM,整句
+尺寸单位为毫米,ALL DIMENSIONS IN MM,整句
+单位均为毫米,ALL DIMENSIONS IN MM,整句
+未注尺寸按,UNSPECIFIED DIMENSIONS PER,整句
+颜色以样品为准,COLOR AS PER SAMPLE,整句
+以样品为准,AS PER SAMPLE,整句
+以图纸为准,AS PER DRAWING,整句
+见图纸,SEE DRAWING,整句
+见明细表,SEE PARTS LIST,整句
+左右对称,LEFT AND RIGHT SYMMETRICAL,整句
+左右对称件,LEFT AND RIGHT HANDED,整句
+镜像件,MIRROR PART,整句
+配对使用,USE IN PAIRS,整句
+方向不得装反,DO NOT INSTALL UPSIDE DOWN,整句
+主,MAIN,通用
+副,SUB,通用
+上,UPPER,通用
+下,LOWER,通用
+左,LEFT,通用
+右,RIGHT,通用
+前,FRONT,通用
+后,REAR,通用
+内,INNER,通用
+外,OUTER,通用
+顶,TOP,通用
+底,BOTTOM,通用
+中心,CENTER,通用
+中间,MIDDLE,通用
+侧,SIDE,通用
+双,DOUBLE,通用
+单,SINGLE,通用
+可调,ADJUSTABLE,通用
+固定,FIXED,通用
+活动,MOVABLE,通用
+加强,REINFORCED,通用
+加厚,THICKENED,通用
+不允许有,NO,整句
+不允许,NOT ALLOWED,整句
+不得有,NO,整句
+孔,HOLE,通用
+四孔,4-HOLE,通用
+两孔,2-HOLE,通用
+双孔,2-HOLE,通用
+三孔,3-HOLE,通用
+六孔,6-HOLE,通用
+八孔,8-HOLE,通用
+长孔,SLOT HOLE,通用
+腰形孔,SLOT,通用
+方孔,SQUARE HOLE,通用
+圆孔,ROUND HOLE,通用
+螺纹孔,THREADED HOLE,通用
+过孔,CLEARANCE HOLE,通用
+定位孔,LOCATING HOLE,通用
+安装孔,MOUNTING HOLE,通用
+漏水孔,DRAIN HOLE,通用
+排气孔,AIR VENT,通用
+板,PLATE,通用
+平板,FLAT PLATE,通用
+底板,BASE PLATE,通用
+顶板,TOP PLATE,通用
+侧板,SIDE PLATE,通用
+隔板,PARTITION,通用
+加强筋,RIB,通用
+筋条,RIB,通用
+槽,SLOT,通用
+槽口,NOTCH,通用
+缺口,NOTCH,通用
+开口,OPENING,通用
+边框,FRAME,通用
+框架,FRAME,通用
+支架,BRACKET,通用
+支座,SUPPORT,通用
+底座,BASE,通用
+盖板,COVER PLATE,通用
+上盖,UPPER COVER,通用
+下盖,LOWER COVER,通用
+主阀体,MAIN VALVE BODY,管路阀门
+副阀体,SUB VALVE BODY,管路阀门
+把手,HANDLE,通用
+拉手,HANDLE,通用
+挂钩,HOOK,通用
+卡扣,SNAP,通用
+卡槽,SNAP SLOT,通用
+铰链,HINGE,通用
+合页,HINGE,通用
+插销,LATCH,通用
+锁扣,LATCH,通用
+轮子,WHEEL,通用
+脚轮,CASTER,通用
+垫脚,FOOT PAD,通用
+标签袋,LABEL HOLDER,通用
+插卡槽,CARD HOLDER,通用
+产品,PRODUCT,通用
+表面,SURFACE,通用
+气泡,BUBBLE,通用
+缩水,SINK MARK,通用
+飞边,FLASH,通用
+缺料,SHORT SHOT,通用
+划痕,SCRATCH,通用
+杂质,IMPURITY,通用
+裂纹,CRACK,通用
+变形,DEFORMATION,通用
+毛刺,BURR,通用
+色差,COLOR DIFFERENCE,通用
+油污,OIL STAIN,通用
+水纹,FLOW MARK,通用
+熔接痕,WELD LINE,通用
+银纹,SILVER STREAK,通用
+集装筐,CONTAINER BOX,通用
+周转箱,TOTE BOX,通用
+折叠,FOLDABLE,通用
+可折叠,FOLDABLE,通用
+堆码,STACKING,通用
+可堆叠,STACKABLE,通用
+嵌套,NESTABLE,通用
+可嵌套,NESTABLE,通用
+堆码层数,STACKING LAYERS,通用
+正面,FRONT SIDE,通用
+反面,REAR SIDE,通用
+左侧面,LEFT SIDE,通用
+右侧面,RIGHT SIDE,通用
+底面,BOTTOM FACE,通用
+顶面,TOP FACE,通用
+外形尺寸,OVERALL DIMENSIONS,通用
+内尺寸,INNER DIMENSIONS,通用
+公差要求,TOLERANCE REQUIREMENT,通用
+材质说明,MATERIAL SPECIFICATION,通用
+模具号,MOLD NO.,通用
+生产日期,PRODUCTION DATE,通用
+批次号,BATCH NO.,通用
+供应商,SUPPLIER,通用
+制造商,MANUFACTURER,通用
+产地,ORIGIN,通用
+注册商标,REGISTERED TRADEMARK,通用
+专利号,PATENT NO.,通用
+锁紧环,LOCKING COLLAR,通用
+支撑管,BRACE TUBE,通用
+支撑杆,BRACE,通用
+支撑,BRACE,通用
+锁紧环,COLLAR,通用
+抱箍,CLAMP BAND,通用
+套管,SLEEVE,通用
+方管,SQUARE TUBE,通用
+方钢管,SQUARE STEEL TUBE,通用
+矩形管,RECTANGULAR TUBE,通用
+圆管,ROUND TUBE,通用
+管,TUBE,通用
+型材,PROFILE,通用
+立柱,POST,通用
+方立柱,SQUARE POST,通用
+加长立柱,EXTENDER POST,通用
+加长件,EXTENDER,通用
+围栏,FENCE,通用
+围栏板,FENCE PANEL,通用
+围栏底座,FENCE FOOT,通用
+底座,FOOT,通用
+闸门,GATE,通用
+前闸门,FRONT GATE,通用
+闸门面板,GATE FACE,通用
+面板,PANEL,通用
+锁销,LOCK PIN,通用
+U形夹销,CLEVIS PIN,通用
+C形卡簧,C-CLIP,通用
+R形卡簧,R-CLIP,通用
+卡簧,CIRCLIP,通用
+铰链,HINGE,通用
+铰链销,HINGE PIN,通用
+衬垫,LINER,通用
+橡胶衬垫,RUBBER LINER,通用
+底轨,BOTTOM RAIL,通用
+轨道,RAIL,通用
+立杆,STEM,通用
+立杆加U形夹,STEM AND CLEVIS,通用
+系绳,LANYARD,通用
+配重,BALLAST,通用
+风荷载,WIND LOAD,通用
+载荷,LOAD,通用
+剪切,SHEAR,通用
+顶丝,GRUB SCREW,通用
+分度柱塞,INDEXING PLUNGER,通用
+弹簧柱塞,SPRING PLUNGER,通用
+U型槽钢,U-CHANNEL,材料
+英寸,INCH,单位
+英尺,FOOT-LENGTH,单位
+磅,LB,单位
+装配体,ASSEMBLY,通用
+完整装配,COMPLETE ASSEMBLY,通用
+装配完成,COMPLETE ASSEMBLY,通用
+详图,DETAIL,视图
+立面图,ELEVATION,视图
+正立面图,FRONT ELEVATION,视图
+侧立面图,SIDE ELEVATION,视图
+俯视图,PLAN VIEW,视图
+零件,PART,标题栏
+单位,UNITS,标题栏
+设计者,DESIGNER,标题栏
+修订,REV,标题栏
+状态,STATUS,标题栏
+车间审核,SHOP REVIEW,标题栏
+安装,INSTALLING,通用
+注意事项,NOTES,通用
+铆死,PEENED,工艺
+防脱落,CAPTIVE,通用
+现场核实,VERIFY ON SITE,整句
+确认尺寸,VERIFY SIZE,整句
+不按比例,NOT TO SCALE,整句
+尺寸为准,DIMENSIONS GOVERN,整句
+立柱,POST,构件
+横梁,RAIL,构件
+斜撑,BRACE,构件
+锁紧环,COLLAR,构件
+套管,SLEEVE,构件
+U形夹销,CLEVIS PIN,紧固
+C形卡簧,C-CLIP,紧固
+接头,TANG,构件
+铰链,HINGE,构件
+门扇,GATE,构件
+挂锁,PADLOCK,紧固
+配重,BALLAST,工艺
+去毛刺,DEBURR,工艺
+热浸镀锌,HOT-DIP GALVANIZE,表面处理
+喷粉,POWDER COAT,表面处理
+网片,MESH,构件
+网布,SCRIM,材料
+立杆,UPRIGHT,构件
+方管,SQUARE TUBE,材料
+板,PLATE,材料
+铰链节,KNUCKLE,构件
+铆死,PEENED,工艺
+弹簧柱塞,SPRING PLUNGER,紧固
+分度柱塞,INDEXING PLUNGER,紧固
+旋转节,SWIVEL,构件
+系绳,LANYARD,紧固
+防脱落,CAPTIVE,设计
+三元乙丙橡胶,EPDM,材料
+风载,WIND LOAD,力学
+剪切,SHEAR,力学
+衬垫,LINER,材料
+底座,FOOT,构件
+加长段,EXTENDER,构件
+面板,PANEL,构件
+槽钢,CHANNEL,材料
+锁定,LOCK,动作
+外侧,PUBLIC SIDE,方位
+斜撑侧,BRACE SIDE,方位
+内侧,INSIDE,方位
+外侧,OUTSIDE,方位
+正面,FRONT,方位
+俯视图,PLAN VIEW,视图
+正立面,FRONT ELEVATION,视图
+侧立面,SIDE ELEVATION,视图
+侧视图,SIDE VIEW,视图
+剖视,SECTION,视图
+详图,DETAIL,视图
+零件清单,PARTS LIST,标题栏
+说明,NOTES,标题栏
+安装,INSTALLING,标题栏
+角度,ANGLE,标注
+适用场合,WHEN TO USE,标注
+高度,HEIGHT,标注
+距离,DISTANCE,标注
+材料/规格,MATERIAL / SIZE,标题栏
+数量,QTY,标题栏
+图号,DWG NO.,标题栏
+修订,REV,标题栏
+车间审核,SHOP REVIEW,标题栏
