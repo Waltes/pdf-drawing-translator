@@ -17,16 +17,36 @@ import re
 import pymupdf
 
 from . import image_text
+from . import i18n
 from . import paragraph as paragraph_mod
 # 单位换算的判定要和翻译层用同一套规则，不能各写一份：
-# 「这条原文里有没有会被换算的英制」直接问翻译层要答案，
+# 「这条原文里有没有会被换算的量」直接问翻译层要答案，
 # 否则这边改了那边没改，会出现「单位声明改了、数值却没换算」的错位。
-from .translate import convert_to_metric, has_imperial
+from .translate import (UNIT_IMPERIAL, UNIT_KEEP, UNIT_METRIC,
+                        convert_to_metric, convert_units, has_imperial,
+                        has_metric)
+
+
+def needs_convert(text, mode=UNIT_METRIC):
+    """
+    按输出单位判断「这条文字里有没有要换算的量」。
+
+    公制模式看英制（英寸→毫米），英制模式看公制（毫米→英寸），
+    保持原样模式一律 False —— 这时候连标注版都不该生成，
+    否则会出现一份「标了一堆黄块、数值一个没变」的图，比不标更让人困惑。
+    """
+    if mode == UNIT_IMPERIAL:
+        return has_metric(text)
+    if mode == UNIT_KEEP:
+        return False
+    return has_imperial(text)
 
 # ---------------------------------------------------------------------------
 # 字体池
-# 中文与西文必须分开：中文用系统中文字体，西文用 Arial，
-# 混用会导致字形难看或直接写不进去。
+# 中文和西文必须分开：中文用系统中文字体，西文用 PDF 内置的西文字体。
+# 这里刻意**不**再挂 Arial：PyMuPDF 写系统 TTF 时，ToUnicode 表是按字形反查
+# 码位生成的，Arial 把连字符/软连字符、空格/不换行空格、·/U+A78F 画成同一个
+# 字形，反查会挑错 —— 肉眼一模一样，复制出来却是断的。具体见 font_for。
 # ---------------------------------------------------------------------------
 FONT_FILES = {
     "cjk": [
@@ -34,13 +54,19 @@ FONT_FILES = {
         ("C:/Windows/Fonts/simhei.ttf", "黑体"),
         ("C:/Windows/Fonts/simsun.ttc", "宋体"),
     ],
-    "latin": [
-        ("C:/Windows/Fonts/arial.ttf", "Arial"),
-        ("C:/Windows/Fonts/segoeui.ttf", "Segoe UI"),
-    ],
 }
 
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+# 假名（日文）与谚文（韩文）。它们不在 CJK_RE 的汉字区里，但同样不能用西文字体：
+# 内置西文字体没有假名字形，写进去就是一片空白。
+# 这两个语种是国际版的目标语之一，不单独认出来，译文直接变白纸。
+KANA_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]")
+HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]")
+
+# 纯 ASCII：能直接被 PDF 的 WinAnsi 编码装下，用内置西文字体最稳
+ASCII_ONLY_RE = re.compile(r"[\x00-\x7f]*\Z")
+
 
 # 图纸上有一类文字根本不该翻译：图号（BR-01）、修订号（E）、日期、纯型号。
 # 它们不是"没翻"，而是"不需要翻"，混进未译清单会让覆盖率看起来很差，也会误导用户。
@@ -60,13 +86,22 @@ def is_identifier(text: str) -> bool:
 class FontPool:
     """字体加载与缓存。字体文件只读一次，后续复用"""
 
+    # 不读磁盘、直接用 PyMuPDF 内置的两个字体：
+    #   helv —— 内置 Helvetica，纯 ASCII 用它（字符映射干净，见 font_for）
+    #   cjk  —— 内置 CJK 字体，覆盖最广，韩文只认它
+    BUILTIN = {"latin_ascii": "helv", "builtin_cjk": "cjk"}
+
     def __init__(self):
         self._cache = {}
 
     def get(self, kind):
-        """kind: 'cjk' 或 'latin'。找不到中文字体时退回内置 CJK 字体"""
+        """kind: 'cjk' / 'latin' / 'latin_ascii' / 'builtin_cjk'"""
         if kind in self._cache:
             return self._cache[kind]
+        if kind in self.BUILTIN:
+            font = pymupdf.Font(self.BUILTIN[kind])
+            self._cache[kind] = font
+            return font
         font = None
         for path, _name in FONT_FILES.get(kind, []):
             if os.path.exists(path):
@@ -83,6 +118,40 @@ class FontPool:
 
 
 FONTS = FontPool()
+
+
+def font_for(text):
+    """
+    按文字内容挑字体。四处写字的地方都走这里，别各挑各的。
+
+    四档，按「这个字体到底有没有这个字、写进去还是不是原来那个码位」定：
+
+    1. 韩文 → 内置 CJK 字体。实测 Windows 的雅黑、黑体、宋体、Arial
+       **没有一个**带韩文字形（has_glyph 全 False），用系统字体就是满屏空白。
+    2. 汉字 / 日文假名 → 雅黑（沿用原来的观感）。假名必须一起判：
+       内置西文字体没有假名字形，日文译文会写成白纸。
+    3. 内置西文字体能覆盖的（ASCII、西欧重音字母、西里尔字母、
+       · ° × — “ ” • 这些符号）→ 内置 Helvetica。
+       这一档存在的唯一理由是**字符映射准确**：PyMuPDF 写系统 TTF 时，
+       ToUnicode 表按字形反查码位生成，而 Arial、雅黑都把若干字符画成
+       同一个字形，反查会挑中错的那个 —— 实测「·」写成 U+A78F、
+       「•」写成 U+00A0、「-」写成 U+00AD。肉眼一模一样，但复制出来是断的、
+       搜索也搜不到；图纸上的数值是要被复制去下料的。内置字体的映射是干净的，
+       宽度上 Helvetica 与 Arial 度量兼容，混排在同一页看不出差别。
+    4. 内置西文字体装不下的（⑤⑭ 这类图纸编号、⌀ 等工程符号）
+       → 内置 CJK 字体。它覆盖最广，映射同样干净。
+       **不回退系统 Arial**：一行里混进一个⑤，整行的连字符和空格都会被
+       写成软连字符和不换行空格（实测踩到过，就是这条注释的由来）。
+    """
+    s = text or ""
+    if HANGUL_RE.search(s):
+        return FONTS.get("builtin_cjk")
+    if CJK_RE.search(s) or KANA_RE.search(s):
+        return FONTS.get("cjk")
+    helv = FONTS.get("latin_ascii")
+    if ASCII_ONLY_RE.match(s) or all(helv.has_glyph(ord(c)) for c in set(s)):
+        return helv
+    return FONTS.get("builtin_cjk")
 
 
 def has_chinese(text: str) -> bool:
@@ -294,7 +363,7 @@ def write_paragraph(page, lines, new_text):
     中文往往一个短句就说完，硬按原行数拆会把词语劈开（「弹簧加」/「载，带拉环」）。
     这种一律合成一行，字号按最宽那行的空间自适应。
     """
-    font = FONTS.get("cjk" if has_chinese(new_text) else "latin")
+    font = font_for(new_text)
 
     if len(new_text) <= 26 and len(lines) <= 2:
         box = max(g.rect.width for g in lines)
@@ -347,7 +416,7 @@ def write_groups(page, entries):
             continue
         # 旋转文字的可排版长度是纵向跨度，水平文字是横向宽度
         box_len = g.rect.width if abs(g.angle % 180) < 1 else g.rect.height
-        font = FONTS.get("cjk" if has_chinese(new_text) else "latin")
+        font = font_for(new_text)
         size = fit_font_size(font, new_text, g.size, box_len)
         plan.append({"g": g, "text": new_text, "font": font, "size": size})
 
@@ -421,7 +490,14 @@ def write_groups(page, entries):
 #
 # 但只改成「毫米」也不够：看图纸的人核对原件时会对不上数，
 # 所以还要注明「原图是英寸、数值已经换算过」。
-_UNIT_WORD_RE = re.compile(r"(?<![A-Za-z])(inch(?:es)?|英寸|英制)(?![A-Za-z])", re.I)
+_UNIT_WORD_RE = {
+    # 公制输出时，图上的「单位：英寸」要认出来并改写
+    UNIT_METRIC: re.compile(r"(?<![A-Za-z])(inch(?:es)?|英寸|英制|imperial)(?![A-Za-z])",
+                            re.I),
+    # 英制输出时反过来：认 mm / 毫米 / 公制
+    UNIT_IMPERIAL: re.compile(r"(?<![A-Za-z])(mm|毫米|公制|metric|millimet(?:er|re)s?)"
+                              r"(?![A-Za-z])", re.I),
+}
 
 # 判定「这是单位声明块」的长度上限。
 # 声明块就是「英寸」「inch」这种一个词的短格子；
@@ -429,36 +505,67 @@ _UNIT_WORD_RE = re.compile(r"(?<![A-Za-z])(inch(?:es)?|英寸|英制)(?![A-Za-z]
 UNIT_DECL_MAXLEN = 24
 
 
-def is_unit_declaration(text):
+def is_unit_declaration(text, mode=UNIT_METRIC):
     """
     这一块文字是不是单位的声明（而不是某个具体尺寸）。
 
     三条同时成立才算：长度短、含单位词、不含数字。
     不含数字这条是关键 —— 「9 英尺」是尺寸，「英寸」才是声明。
+
+    单位词按输出模式选：公制模式认 inch/英寸，英制模式认 mm/毫米。
+    只认一边的话，反方向输出时这一格根本不会被改写，
+    图纸上就会出现「数值是 78.74"、单位栏还写着毫米」的矛盾。
     """
     s = (text or "").strip()
     if not s or len(s) > UNIT_DECL_MAXLEN:
         return False
     if any(ch.isdigit() for ch in s):
         return False
-    return bool(_UNIT_WORD_RE.search(s))
+    pat = _UNIT_WORD_RE.get(mode, _UNIT_WORD_RE[UNIT_METRIC])
+    return bool(pat.search(s))
 
 
-def write_unit_decl(page, g, src_text):
+# 我们自己写下的说明行（见 write_unit_decl）。
+# 认它的唯一用处是「二次处理时整块擦掉」：用户拿我们出过的图纸再跑一遍
+# （客户退回、换个语种重出、接着上一版继续改）是很常见的用法，
+# 那一行只有 3pt 高，被当成普通文字送去翻译再写回去会塞不下、
+# 在图上留下半截字，和新写的说明行叠成两套。
+_DECL_NOTE_RE = re.compile(r"(?:已换算|原图(?:英寸|毫米)|converted\s+from)", re.I)
+
+
+def is_decl_note(text):
+    """这一小块是不是我们上一版留下的单位说明行（而不是图纸原本的内容）"""
+    s = (text or "").strip()
+    if not s or len(s) > UNIT_DECL_MAXLEN:
+        return False
+    return bool(_DECL_NOTE_RE.search(s))
+
+
+def write_unit_decl(page, g, src_text, mode=UNIT_METRIC, doc_lang="zh"):
     """
     改写单位声明格：第一行写新单位，第二行小字注明原单位和已换算。
 
     为什么分两行：这一格宽度通常只有 20~90pt（BR-01 是 90pt），
     写成一行「毫米（原图英寸，已换算）」会被自动缩到 4pt 以下，打印出来是糊的。
     分两行后主行能保住原字号大小，说明文字用 0.55 倍字号，看得清也不占地方。
-    """
-    zh_out = not has_chinese(src_text)      # 源是英文 → 译文用中文
-    if zh_out:
-        main, note = "毫米", "原图英寸，已换算"
-    else:
-        main, note = "mm", "converted from inch"
 
-    font = FONTS.get("cjk" if zh_out else "latin")
+    mode 决定写哪一边：公制模式「毫米 / 原图英寸」，英制模式「英寸 / 原图毫米」。
+    写反了比不改更糟 —— 车间会照着错的单位下料。
+
+    doc_lang 决定写哪种文字，指**这份产出文件**的语言，不是界面语言。
+    中文界面的中国工程师翻一份英文图给国外客户，声明格里写「毫米」，
+    收图的人一个字都看不懂；反过来英文界面的用户出中文图也一样。
+    非中文的目标语（日/德/法…）一律用英文 —— 这些语言没有词表，
+    写中文更看不懂，英文至少是图纸的通用语。
+    """
+    if (doc_lang or "zh") == "zh":
+        main, note = ("英寸", "原图毫米，已换算") if mode == UNIT_IMPERIAL \
+            else ("毫米", "原图英寸，已换算")
+    else:
+        main, note = ("INCHES", "converted from mm") if mode == UNIT_IMPERIAL \
+            else ("mm", "converted from inch")
+
+    font = font_for(main)
     color = _int_to_rgb(g.color)
 
     # 主行：宽度按格子自适应，但不放大超过原字号
@@ -468,7 +575,7 @@ def write_unit_decl(page, g, src_text):
     tw.write_text(page, color=color)
 
     # 说明行：紧跟主行下方，字号 0.55 倍（下限 4.5pt，再小就印不出来）
-    nfont = FONTS.get("cjk" if has_chinese(note) else "latin")
+    nfont = font_for(note)
     nsize = max(4.5, size * 0.55)
     # 放不下就把说明行缩到格子宽度以内
     nsize = min(nsize, fit_font_size(nfont, note, nsize, g.rect.width))
@@ -477,7 +584,10 @@ def write_unit_decl(page, g, src_text):
     tw2.append(norg, note, font=nfont, fontsize=nsize)
     tw2.write_text(page, color=color)
 
-    return ("单位声明", src_text, f"{main}（{note}）")
+    # 清单回执里的括号跟界面语言走：父级登记的是给人看的报表行，
+    # 一份英文清单里夹一对全角括号（），排版上很扎眼
+    pair = (f"{main} ({note})" if i18n.is_en() else f"{main}（{note}）")
+    return (i18n.T("单位声明"), src_text, pair)
 
 
 # ---------------------------------------------------------------------------
@@ -494,32 +604,47 @@ MARK_OPACITY = 0.45
 
 # 数值 与 「数值(–数值) 单位」两种形态，标注和抽取都用这两个
 _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_NUM_RANGE_UNIT = re.compile(
-    r"\d[\d,]*(?:\.\d+)?(?:\s*[–—~～-]\s*\d[\d,]*(?:\.\d+)?)?\s*(?:mm|kg)", re.I)
+
+# 标注版要认的单位，跟着输出单位走：
+# 公制模式标 104.78mm / 11.34kg，英制模式标 4-1/8" / 11.34 lb。
+# 认错了就会出现「黄块画在数字上、单位却是另一种」的怪图。
+_MARK_UNIT_RE = {
+    UNIT_METRIC: re.compile(r"(?:mm|kg)", re.I),
+    UNIT_IMPERIAL: re.compile(r'(?:"|″|”|lb)', re.I),
+}
 
 
-def paint_metric_marks(doc, converted_texts):
+def _num_unit_re(mode):
+    """「数值 + 目标单位」的匹配式。范围写法的前一个数也要跟着抓"""
+    unit = r'(?:[\"″”]|lb|lbs)' if mode == UNIT_IMPERIAL else r"(?:mm|kg)"
+    return re.compile(
+        r"\d[\d,]*(?:\.\d+)?(?:\s*[–—~～-]\s*\d[\d,]*(?:\.\d+)?)?\s*" + unit, re.I)
+
+
+def paint_metric_marks(doc, converted_texts, mode=UNIT_METRIC):
     """
-    给所有换算出来的毫米/千克数值画荧光笔底。
+    给所有换算出来的数值画荧光笔底。
 
     converted_texts: {页码(0基): [该页换算后的译文, ...]}
     返回实际标注的数值个数。
 
-    只标「这一条确实由英制换算而来」的数值：
-    原文本来就写毫米的（中文图纸的 2000mm）不在这个集合里，不会被误标。
+    只标「这一条确实被换算过」的数值：
+    原文本来就写目标单位的（公制模式下的 2000mm）不在这个集合里，不会被误标。
     """
     painted = 0
+    num_unit = _num_unit_re(mode)
+    unit_re = _MARK_UNIT_RE.get(mode, _MARK_UNIT_RE[UNIT_METRIC])
     for page_no, texts in converted_texts.items():
         if page_no >= len(doc):
             continue
         page = doc[page_no]
 
-        # 该页换算产生的所有公制数值。
+        # 该页换算产生的所有目标单位数值。
         # 存「纯数字」而不是「数字+单位」：范围写法 0.363–0.454kg 里的
         # 前一个值后面跟的是破折号不是 kg，按整串比对会把它漏掉。
         want = set()
         for t in texts:
-            for m in _NUM_RANGE_UNIT.finditer(t or ""):
+            for m in num_unit.finditer(t or ""):
                 for n in _NUM_RE.findall(m.group(0)):
                     want.add(n)
         if not want:
@@ -527,9 +652,9 @@ def paint_metric_marks(doc, converted_texts):
 
         for w in page.get_text("words"):
             token = w[4].strip().rstrip(",.;:，。；：")
-            # 只有含 mm / kg 的词才可能是换算结果，
+            # 只有含目标单位的词才可能是换算结果，
             # 这一条同时挡住了「数量 2」「角度 38」这类纯数字被误标
-            if not re.search(r"(?:mm|kg)", token, re.I):
+            if not unit_re.search(token):
                 continue
             # R88.90mm / Ø12.70mm / 0.363–0.454kg 这类，只要词里有任意一个
             # 换算出来的数值就整词标黄（和人工用荧光笔划一下的习惯一致）
@@ -546,22 +671,25 @@ def paint_metric_marks(doc, converted_texts):
     return painted
 
 
-def doc_has_metric(doc):
+def doc_has_metric(doc, mode=UNIT_METRIC):
     """
-    这份文档里到底有没有会被换算的英制尺寸。
+    这份文档里到底有没有会在本次设置下被换算的数值。
 
     为什么要预扫：单位声明栏在不同图纸的页面上都有（多页图纸每页都印标题栏），
     而第 1 页可能一个英制尺寸都没有。逐页决定「这一页要不要改单位声明」
     会因为「翻译到这一页时还不知道后面有没有换算」而出错，
     所以先整篇扫一遍，再统一决定。
 
-    用 convert_to_metric 判断而不是 has_imperial：
+    用 convert_units 判断而不是 has_imperial：
     后者把 NPT 1/2" 这类螺纹代号也算成「有英制」，而代号是不换算的，
     那样会出现「单位改成毫米、数值却一个没变」的矛盾文件。
+    英制模式同理：判断的是「毫米→英寸会不会真的变」。
     """
+    if mode == UNIT_KEEP:
+        return False
     for page in doc:
         t = page.get_text() or ""
-        if t and convert_to_metric(t) != t:
+        if t and convert_units(t, mode) != t:
             return True
     return False
 
@@ -595,7 +723,7 @@ def analyze_pdf(path):
 
 def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
-                stats_out=None, annotate_path=None):
+                stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC):
     """
     处理整份 PDF。
     translate_fn(text, lang) -> str      逐条翻译（兼容旧用法）
@@ -608,8 +736,14 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          targets / translated / untranslated(清单)
                                          有了它才能对用户如实交代「有没有全部译完」
     annotate_path                        传了就在出完译文版之后，再出一份带荧光笔标注的版本，
-                                         把所有由英制换算来的 mm / kg 数值标黄。
+                                         把所有换算过的数值标黄。
                                          两版内容完全一样，区别只在标注。
+    unit_mode                            输出单位：metric / imperial / keep。
+                                         它决定了「什么算需要换算」「单位声明改成哪边」
+                                         「标注版标哪些数」三件事，必须一路传到底，
+                                         任何一处按公制写死都会造出自相矛盾的文件。
+                                         单位声明格用哪种文字不在这里传 ——
+                                         按 translate_fn 的目标语言定，见 write_unit_decl。
     """
     doc = pymupdf.open(src_path)
     total = len(doc)
@@ -617,10 +751,27 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
     stat = {"targets": 0, "translated": 0, "untranslated": [], "image_texts": 0,
             "paragraphs": 0, "unit_decl_fixed": 0, "metric_marks": 0}
 
-    # 整篇先扫一遍有没有可换算的英制尺寸。
-    # 有这个才改单位声明栏 —— 没有换算却把「英寸」改成「毫米」，
+    # 整篇先扫一遍有没有会换算的量。
+    # 有才改单位声明栏 —— 没有换算却把「英寸」改成「毫米」，
     # 等于把一份英制图纸谎称成公制，比不改更糟。
-    need_metric = doc_has_metric(doc)
+    need_metric = doc_has_metric(doc, unit_mode)
+
+    # 单位声明格写哪种文字（见 write_unit_decl）：跟**产出文件**的语种走，
+    # 不是跟界面语言走。语种只有翻译器知道（目标语言下拉），从它身上读。
+    # 两个入口都要看：调用方可能只传 translate_batch（走批量并发时是常态），
+    # 那时 translate_fn 是 None，语种得从批量接口的绑定对象上取
+    # （translate_many 是 Translator 的绑定方法，__self__ 就是那个实例）。
+    # 都取不到就退回界面语言 —— 自检里就是这种情况，和改造前的行为一致。
+    hint_obj = translate_fn if translate_fn is not None else \
+        getattr(translate_batch, "__self__", None)
+    dst_hint = getattr(hint_obj, "dst_lang", "") or ""
+    if dst_hint == "auto":
+        # 目标选「自动」＝翻成系统语言，跟 Translator._resolve 用同一口径，
+        # 否则会出现「文字翻了、单位声明格还写着另一种语言」的错位
+        dst_hint = i18n.auto_target()
+    # 非中文产出（含日/德/法这些没有词表的目标语）一律写英文声明：
+    # 收图的人看不懂中文，英文至少是图纸通用语
+    doc_lang = "zh" if dst_hint == "zh" else ("en" if dst_hint else i18n.get_lang())
 
     # 换算产生的译文按页留档，最后用来画荧光笔标注
     converted_texts = {}
@@ -651,7 +802,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             lg = detect_lang(txt)
             if is_identifier(txt):
                 continue
-            if lg in ("zh", "en") or has_imperial(txt):
+            if lg in ("zh", "en") or needs_convert(txt, unit_mode):
                 units.append(("para", p, txt, lg if lg != "none" else "en"))
         for g in singles:
             t = g.text.strip()
@@ -659,10 +810,10 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 continue
             # 纯尺寸标注（76-1/2"、108"、1-1/2"）里没有一个字母，
             # detect_lang 判成 none，原来会直接跳过 ——
-            # 而这是图纸上最常见的一种标注：尺寸线上只有数字和英寸符号。
-            # 结果就是正文里的英制都换算了，偏偏尺寸线上一个都没动。
+            # 而这是图纸上最常见的一种标注：尺寸线上只有数字和单位符号。
+            # 结果就是正文里的单位都换算了，偏偏尺寸线上一个都没动。
             # 标成 size 单独走：这类没有文字可译，只有数值要算。
-            if g.lang == "none" and has_imperial(t):
+            if g.lang == "none" and needs_convert(t, unit_mode):
                 units.append(("size", g, t, "en"))
             elif g.lang in ("zh", "en"):
                 units.append(("single", g, t, g.lang))
@@ -703,7 +854,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             for u in units:
                 new_texts.append(next(it) if u[0] != "size" else u[2])
 
-            para_entries, single_entries, decl_entries = [], [], []
+            para_entries, single_entries, decl_entries, stale_entries = [], [], [], []
             for (kind, payload, text, _lang), new_text in zip(units, new_texts):
                 if not text:
                     continue
@@ -713,19 +864,32 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 # 76-1/2" 改写成 76.5" 或 6 英尺 4 英寸 —— 一旦改写，
                 # 后面基于符号的正则换算就认不出来了。数值一律用自己算的。
                 if kind == "size":
-                    new_text = convert_to_metric(text)
+                    new_text = convert_units(text, unit_mode)
+
+                # 上一版自己写下的说明行（「原图英寸，已换算」/
+                # 「converted from inch」）：整块擦掉，不重写。
+                # 用户拿我们出过的图再处理一次（客户退回、改语种重出）很常见，
+                # 那时说明行会被当成普通文字送去翻译 —— 它只有 3pt 高，
+                # 写回去塞不下几个字，图上就留下半截「换算」，
+                # 和新写的说明行叠在一起，等于两套说明互相打架。
+                # 新说明由 write_unit_decl 紧跟着主行重新写，不会漏。
+                if need_metric and kind in ("single", "size") and \
+                        is_decl_note(text):
+                    stale_entries.append(payload)
+                    continue
 
                 # 单位声明格先拦下来：它不是尺寸，不能参与换算，
                 # 也不能当普通文字翻（翻成「英寸」就等于没处理）。
-                if need_metric and kind in ("single", "size") and is_unit_declaration(text):
+                if need_metric and kind in ("single", "size") and \
+                        is_unit_declaration(text, unit_mode):
                     decl_entries.append((payload, text))
                     continue
 
                 # 记下「这一条确实换算过」的最终译文，供【标注】版标黄。
-                # 三个条件都要满足：原文含可换算的英制、有译文、译文里真的有 mm/kg。
-                # 螺纹代号（NPT 1/2"）原文含英制但不换算，不会被记进来。
-                if (new_text and convert_to_metric(text) != text
-                        and re.search(r"\d\s*(?:mm|kg)", new_text, re.I)):
+                # 三个条件都要满足：原文含可换算的量、有译文、译文里真的有目标单位。
+                # 螺纹代号（NPT 1/2"）原文含英寸但不换算，不会被记进来。
+                if (new_text and convert_units(text, unit_mode) != text
+                        and _num_unit_re(unit_mode).search(new_text)):
                     converted_texts.setdefault(page_no, []).append(new_text)
 
                 # 译文必须非空且确实变了，否则不处理，防止把原文搞丢
@@ -738,7 +902,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                     # 没翻出来的记进清单，最后如实告诉用户漏了哪些
                     stat["untranslated"].append((page_no + 1, text))
 
-            if para_entries or single_entries or decl_entries:
+            if para_entries or single_entries or decl_entries or stale_entries:
                 # 先擦后写，顺序不能反
                 to_erase = []
                 for p, _ in para_entries:
@@ -747,6 +911,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                     to_erase.append(g)
                 for g, _ in decl_entries:
                     to_erase.append(g)
+                to_erase.extend(stale_entries)
                 erase_text(page, to_erase)
 
                 for p, txt in para_entries:
@@ -759,7 +924,8 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                     stat["translated"] += len(page_report)
 
                 for g, src in decl_entries:
-                    all_report.append((page_no + 1,) + write_unit_decl(page, g, src))
+                    all_report.append((page_no + 1,) +
+                                      write_unit_decl(page, g, src, unit_mode, doc_lang))
                     stat["unit_decl_fixed"] += 1
 
                 if progress:
@@ -801,7 +967,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
     if annotate_path:
         try:
             d2 = pymupdf.open(dst_path)
-            n = paint_metric_marks(d2, converted_texts)
+            n = paint_metric_marks(d2, converted_texts, unit_mode)
             if n:
                 d2.save(annotate_path, garbage=3, deflate=True)
                 stat["metric_marks"] = n

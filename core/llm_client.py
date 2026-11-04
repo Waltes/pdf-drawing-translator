@@ -92,6 +92,22 @@ PRESETS = {
         "balance_kind": None,
         "prices": {"gpt-4o-mini": (1.1, 4.4), "gpt-4.1-mini": (2.9, 11.6), "gpt-4o": (18.0, 72.0)},
     },
+    # 本机部署：ollama / LM Studio / vLLM / llama.cpp 都提供 OpenAI 兼容接口。
+    # 三个差异必须显式写出来，否则用户会以为「选了也还是要求填 Key」：
+    #   key_optional : 本机服务默认不校验密钥，留空即可（ollama 就是这样）
+    #   free         : 不产生费用，记账按 0 计，别拿云端单价吓人
+    #   models       : 留空 —— 本机有哪些模型取决于用户 pull 过什么，
+    #                  预置任何名字都是错的。点「测试连接」会自动拉真实列表。
+    "local": {
+        "label": "本机部署（ollama / LM Studio / vLLM）",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "models": [],
+        "balance_url": None,
+        "balance_kind": None,
+        "prices": {},
+        "key_optional": True,
+        "free": True,
+    },
     "custom": {
         "label": "自定义（任意 OpenAI 兼容接口）",
         "base_url": "",
@@ -101,6 +117,30 @@ PRESETS = {
         "prices": {},
     },
 }
+
+# 本机 / 局域网的地址。这类地址有两个特殊之处：
+#   1. 不走系统代理（内网接口被代理拦掉是最常见的「明明启动了却连不上」）
+#   2. 通常不校验 API Key，留空也必须能用
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0", "host.docker.internal")
+
+
+def is_local_url(base_url):
+    """
+    判断地址是不是本机/局域网。
+
+    用主机名判，不用 provider 判：用户在「自定义」里填 127.0.0.1 同样该免 Key，
+    反过来填了公网地址的「本机部署」预设也该要求 Key。
+    """
+    try:
+        host = (urllib.parse.urlparse((base_url or "").strip()).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in LOCAL_HOSTS:
+        return True
+    # 局域网段：192.168.x / 10.x / 172.16–31.x，公司内网部署的模型服务常在这里
+    return bool(re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host))
 
 # 没配价格时用的兜底单价，仅用于让费用显示不至于为 0
 FALLBACK_PRICE = (2.0, 6.0)
@@ -116,6 +156,92 @@ FALLBACK_PRICE = (2.0, 6.0)
 # ---------------------------------------------------------------------------
 GENERIC_KEY_HINT = ("任何 OpenAI 兼容的服务都能接：地址和模型名照服务商文档抄，"
                     "密钥各平台互不通用，换服务商要换 key。")
+
+GENERIC_KEY_HINT_EN = ("Any OpenAI-compatible endpoint works: copy the base URL and model "
+                       "name from the provider's docs. Keys are per-platform — switching "
+                       "provider means switching the key.")
+
+# 服务商显示名。中文界面用 PRESETS 里带括注的那版，
+# 英文界面用这个名字 —— 国际用户看到「阿里通义千问（DashScope 兼容模式）」
+# 只会当成乱码，而品牌名 "Alibaba Qwen" 他一眼就知道是什么。
+LABEL_EN = {
+    "deepseek": "DeepSeek (best value)",
+    "qwen": "Alibaba Qwen (DashScope)",
+    "moonshot": "Moonshot Kimi",
+    "zhipu": "Zhipu GLM",
+    "siliconflow": "SiliconFlow",
+    "openai": "OpenAI",
+    "local": "Local model (ollama / LM Studio / vLLM)",
+    "custom": "Custom (any OpenAI-compatible API)",
+}
+
+
+def generic_hint():
+    from . import i18n
+    return GENERIC_KEY_HINT_EN if i18n.is_en() else GENERIC_KEY_HINT
+
+
+def preset_label(provider_id):
+    """服务商在下拉里怎么显示，跟随界面语言"""
+    from . import i18n
+    if i18n.is_en():
+        return LABEL_EN.get(provider_id or "") or \
+            ((PRESETS.get(provider_id) or {}).get("label") or "")
+    return (PRESETS.get(provider_id) or {}).get("label") or ""
+
+
+def key_guide(provider_id):
+    """取某个服务商的申请引导；没登记的当自定义处理，不会返回 None"""
+    from . import i18n
+    g = KEY_GUIDE.get(provider_id or "", KEY_GUIDE["custom"])
+    if not i18n.is_en():
+        return g
+    en = GUIDE_EN.get(provider_id or "", GUIDE_EN["custom"])
+    return {"url": g.get("url"), "btn": en[0], "steps": en[1]}
+
+
+# 英文引导。中文版在上面，两边一一对应 ——
+# 合成一张双语大表会让「改一处忘一处」的概率翻倍，宁可分成两个结构。
+GUIDE_EN = {
+    "deepseek": ("Open DeepSeek keys page",
+                 "1) Open the page and sign up with a phone number or email.\n"
+                 "2) Left menu → \"API keys\" → \"Create API key\".\n"
+                 "3) Copy the sk-... string (shown once) and paste it above.\n"
+                 "New accounts usually come with free credit — enough for dozens of drawings."),
+    "qwen": ("Open Bailian console",
+             "1) Sign in to the Alibaba Cloud Bailian console and enable the model service.\n"
+             "2) Avatar (top right) → \"API-KEY\" → create one.\n"
+             "3) Paste it above. Keep the base URL on compatible-mode/v1."),
+    "moonshot": ("Open Kimi platform",
+                 "1) Sign up at the Moonshot open platform (phone number is enough).\n"
+                 "2) \"API Key management\" → create, give it a name.\n"
+                 "3) Copy the key and paste it above."),
+    "zhipu": ("Open Zhipu keys page",
+              "1) Register at the Zhipu open platform and complete verification.\n"
+              "2) \"API Keys\" → create.\n"
+              "3) The key is \"id.secret\" — copy the whole thing, not half of it."),
+    "siliconflow": ("Open SiliconFlow console",
+                    "1) Sign in to the SiliconFlow console (new users get credit).\n"
+                    "2) \"Account\" → \"API keys\" → create.\n"
+                    "3) Paste it above. Model names keep their slash prefix, e.g. Qwen/Qwen3-32B."),
+    "openai": ("Open OpenAI keys page",
+               "1) Requires direct access to openai.com, which is blocked on many networks.\n"
+               "2) \"API keys\" → Create new secret key.\n"
+               "3) Paste it above. If you cannot reach it, use DeepSeek or SiliconFlow instead."),
+    "local": ("Open the ollama download page",
+              "Running the model on your own machine — not one line of the drawing leaves it. Three steps:\n"
+              "1) Install ollama (or LM Studio, or vLLM), then pull a model: ollama pull qwen3:8b.\n"
+              "2) Make sure it is serving: ollama serve listens on 127.0.0.1:11434 by default.\n"
+              "3) Leave API Key empty and press \"Test connection\" — the models you have "
+              "locally are read back and filled in for you.\n"
+              "A local model is much slower than a cloud one; drop \"items per batch\" to about 10."),
+    "custom": ("",
+               "Any OpenAI-compatible endpoint works. Fill in:\n"
+               "1) Base URL up to the version segment, usually https://your-host/v1.\n"
+               "2) Model name exactly as the provider documents it.\n"
+               "3) A model server on your own machine or company LAN goes here too — "
+               "use 127.0.0.1 or the internal IP, and the key may be left empty."),
+}
 
 KEY_GUIDE = {
     "deepseek": {
@@ -161,20 +287,24 @@ KEY_GUIDE = {
                   "② 「API keys」→ Create new secret key；\n"
                   "③ 复制后粘到上面。用不了的话换 DeepSeek 或硅基流动，效果接近。"),
     },
+    "local": {
+        "url": "https://ollama.com/download",
+        "btn": "打开 ollama 下载页",
+        "steps": ("本机跑模型，图纸内容一条都不出你的电脑。三步：\n"
+                  "① 装 ollama（或 LM Studio、vLLM），命令行执行 ollama pull qwen3:8b 之类拉一个模型；\n"
+                  "② 确认服务在跑：ollama serve，默认监听 127.0.0.1:11434；\n"
+                  "③ API Key 留空不填，点「测试连接」——本机有哪些模型会自动读出来填进「模型名」。\n"
+                  "本机跑比云端慢不少，建议把「每批条数」调到 10 左右。"),
+    },
     "custom": {
         "url": None,
         "btn": "",
         "steps": ("只要对方提供 OpenAI 兼容接口就能接，参数这样填：\n"
                   "① 接口地址写到版本号为止，一般形如 https://你的域名/v1；\n"
                   "② 模型名照对方文档里写的抄，别自己编；\n"
-                  "③ 本机跑 ollama / vLLM 也走这里，地址填 http://127.0.0.1:11434/v1。"),
+                  "③ 本机或公司内网的模型服务也可以填在这里，地址填 127.0.0.1 或内网 IP 即可，密钥可留空。"),
     },
 }
-
-
-def key_guide(provider_id):
-    """取某个服务商的申请引导；没登记的当自定义处理，不会返回 None"""
-    return KEY_GUIDE.get(provider_id or "", KEY_GUIDE["custom"])
 
 
 def _load_price_overrides():
@@ -198,7 +328,12 @@ def price_of(provider_id, model):
     over = _load_price_overrides()
     if model in over:
         return over[model]
-    p = preset_for(provider_id).get("prices", {})
+    preset = preset_for(provider_id)
+    # 本机部署不产生费用。不返回 0 的话会退回云端兜底单价，
+    # 界面就变成「估算 ¥0.35」—— 对着一台自己家的机器报账，纯属误导。
+    if preset.get("free"):
+        return (0.0, 0.0)
+    p = preset.get("prices", {})
     if model in p:
         return p[model]
     # 同系列模型名带后缀时（如 deepseek-chat-0324）退到前缀匹配
@@ -223,45 +358,56 @@ _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _open(req, timeout):
-    """统一的请求入口：本机地址直连，其余走系统代理设置"""
-    host = ""
-    try:
-        host = (urllib.parse.urlparse(req.full_url).hostname or "").lower()
-    except Exception:
-        pass
-    if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+    """统一的请求入口：本机/局域网地址直连，其余走系统代理设置"""
+    if is_local_url(req.full_url):
         return _LOOPBACK_OPENER.open(req, timeout=timeout)
     return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _auth_headers(api_key):
+    """
+    组装请求头。
+
+    本机服务大多不校验密钥，ollama 甚至不接受空的 Bearer 头以外的怪东西 ——
+    所以密钥为空时干脆不发这个字段，而不是发一个 "Bearer "。
+    """
+    h = {"User-Agent": UA}
+    key = (api_key or "").strip()
+    if key:
+        h["Authorization"] = "Bearer " + key
+    return h
 
 
 def _post_json(url, payload, api_key, timeout=90):
     """发一个 JSON POST，返回 (解析后的字典, 原始文本)。异常向上抛"""
     body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + api_key,
-        "User-Agent": UA,
-    })
+    headers = _auth_headers(api_key)
+    headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers)
     with _open(req, timeout) as r:
         raw = r.read().decode("utf-8", "ignore")
     return json.loads(raw), raw
 
 
 def _get_json(url, api_key, timeout=20):
-    req = urllib.request.Request(url, headers={
-        "Authorization": "Bearer " + api_key,
-        "User-Agent": UA,
-    })
+    req = urllib.request.Request(url, headers=_auth_headers(api_key))
     with _open(req, timeout) as r:
         raw = r.read().decode("utf-8", "ignore")
     return json.loads(raw), raw
 
 
-def friendly_error(exc):
+def friendly_error(exc, base_url=""):
     """
     把底层异常翻译成用户能看懂的话。
     窗口里直接显示这些文字，所以不能出现 traceback 或英文堆栈。
+
+    base_url 只用来区分「本机服务没启动」和「公网连不上」——
+    这两种情况的解决办法完全不同，报同一句「请检查网络」等于没提示。
     """
+    from . import i18n
+    T = i18n.T
+    local = is_local_url(base_url)
+
     if isinstance(exc, urllib.error.HTTPError):
         code = exc.code
         try:
@@ -269,24 +415,46 @@ def friendly_error(exc):
         except Exception:
             detail = ""
         if code == 401:
-            return "密钥无效或已过期（401）。请检查 API Key 是否复制完整。"
+            return T("密钥无效或已过期（401）。请检查 API Key 是否复制完整。")
         if code == 402:
-            return "账户余额不足（402）。请先到服务商后台充值。"
+            return T("账户余额不足（402）。请先到服务商后台充值。")
         if code == 403:
-            return "没有权限访问该模型（403）。可能是密钥权限或模型未开通。"
+            return T("没有权限访问该模型（403）。可能是密钥权限或模型未开通。")
         if code == 404:
-            return "接口地址或模型名不存在（404）。请核对「接口地址」和「模型」。"
+            return T("接口地址或模型名不存在（404）。请核对「接口地址」和「模型」。")
         if code == 429:
-            return "请求过于频繁或额度用尽（429）。请稍后再试。"
+            return T("请求过于频繁或额度用尽（429）。请稍后再试。")
         if code >= 500:
-            return f"服务商暂时不可用（{code}），请稍后重试。"
-        return f"接口返回错误 {code}：{detail}"
+            return i18n.fmt("服务商暂时不可用（{code}），请稍后重试。", code=code)
+        return i18n.fmt("接口返回错误 {code}：{detail}", code=code, detail=detail)
+
     if isinstance(exc, urllib.error.URLError):
-        reason = str(getattr(exc, "reason", exc))
-        return f"网络连接失败：{reason}。请检查网络、代理或接口地址是否正确。"
+        # 系统给的 reason 自带句号（"…无法连接。"），模板里再补一个就成「。。」
+        reason = str(getattr(exc, "reason", exc)).rstrip("。. ")
+        if local:
+            if i18n.is_en():
+                # 英文界面下别把 Windows 的中文错误原文塞进去
+                # （"由于目标计算机积极拒绝"），那比不报还难读。
+                # 这里直接写英文、不走 T()/fmt()：它本身就是英文，
+                # 走 i18n 反而会让「未翻译文案」检查误报一条。
+                return ("Cannot reach the local model server (" + base_url + ").\n"
+                        "Start it first — run ollama serve in a terminal, or switch on the "
+                        "local server in LM Studio. The URL and port must match its startup log.")
+            return i18n.fmt(
+                "连不上本机模型服务（{url}）：{reason}。\n"
+                "先确认服务在跑：命令行执行 ollama serve，或打开 LM Studio 的本地服务器；"
+                "地址和端口要与它的启动日志一致。",
+                url=base_url, reason=reason)
+        return i18n.fmt("网络连接失败：{reason}。请检查网络、代理或接口地址是否正确。",
+                        reason=reason)
+
     if isinstance(exc, TimeoutError):
-        return "请求超时。可以换一个更快的服务商，或减少单次翻译条数。"
-    return f"请求失败：{type(exc).__name__} {exc}"
+        if local:
+            return T("本机模型响应超时。大模型在本机跑本来就慢，"
+                     "把「每批条数」调小到 10 左右，或换一个更小的模型再试。")
+        return T("请求超时。可以换一个更快的服务商，或减少单次翻译条数。")
+
+    return i18n.fmt("请求失败：{name} {msg}", name=type(exc).__name__, msg=str(exc))
 
 
 class UsageBook:
@@ -338,19 +506,29 @@ class UsageBook:
     def note_failure(self):
         self.session["failed_calls"] += 1
 
-    def summary(self):
-        """给界面用的一句话摘要"""
+    def summary(self, free=False):
+        """给界面用的一句话摘要。free=True 时（本机部署）不报估算费用"""
+        from . import i18n
         s = self.session
         total = s["prompt_tokens"] + s["completion_tokens"]
+        if i18n.is_en():
+            tail = ("local model, no cost" if free else f"est. ¥{s['cost']:.4f}")
+            return (f"This run: {s['calls']} requests · input {s['prompt_tokens']:,} / "
+                    f"output {s['completion_tokens']:,} tokens ({total:,} total) · {tail}")
+        tail = ("本机推理，不产生费用" if free else f"估算 ¥{s['cost']:.4f}")
         return (f"本次 {s['calls']} 次请求 · 输入 {s['prompt_tokens']:,} / "
-                f"输出 {s['completion_tokens']:,} tokens（合计 {total:,}）· "
-                f"估算 ¥{s['cost']:.4f}")
+                f"输出 {s['completion_tokens']:,} tokens（合计 {total:,}）· {tail}")
 
-    def cumulative_text(self):
+    def cumulative_text(self, free=False):
+        from . import i18n
         c = self.history["cumulative"]
+        if i18n.is_en():
+            tail = ("local model, no cost" if free else f"est. ¥{c['cost']:.4f}")
+            return (f"All time: {c['calls']} requests · "
+                    f"{c['prompt_tokens'] + c['completion_tokens']:,} tokens · {tail}")
+        tail = ("本机推理，不产生费用" if free else f"估算 ¥{c['cost']:.4f}")
         return (f"历史累计 {c['calls']} 次请求 · "
-                f"{c['prompt_tokens'] + c['completion_tokens']:,} tokens · "
-                f"估算 ¥{c['cost']:.4f}")
+                f"{c['prompt_tokens'] + c['completion_tokens']:,} tokens · {tail}")
 
     def add_run(self, file_name, items):
         """一次文件处理完成，归档到历史"""
@@ -401,27 +579,45 @@ class LLMClient:
         self.last_error = ""
 
     # ---------------- 配置检查 ----------------
+    def key_optional(self):
+        """
+        这个接口是否可以不填密钥。
+
+        判据是「地址在本机/局域网」或「预设声明了 key_optional」，
+        不是「服务商是不是 local」—— 公司内网部署的 vLLM 填在「自定义」里，
+        同样不该逼用户去编一个假 Key 才能点开始。
+        """
+        return bool(self.preset.get("key_optional")) or is_local_url(self.base_url)
+
+    def is_local(self):
+        """本机部署：界面要据此改提示语，费用按 0 算"""
+        return bool(self.preset.get("free")) or is_local_url(self.base_url)
+
     def available(self):
         """
-        能不能用：地址 + 密钥 + 模型齐了就算能用。
+        能不能用：地址 + 模型齐了就算能用（本机部署不要求密钥）。
 
         enabled 只作历史遗留的开关，缺省按 True 处理。原来看的是
         `self.cfg.get("enabled")`，而老配置里根本没有这个键（默认 False 兜底），
         结果用户明明填好了 key，界面还写「AI 接口：未配置」。
         """
-        if not (self.base_url and self.api_key and self.model):
+        if not (self.base_url and self.model):
+            return False
+        if not self.api_key and not self.key_optional():
             return False
         return bool(self.cfg.get("enabled", True))
 
     def missing_reason(self):
+        from . import i18n
         miss = []
         if not self.base_url:
-            miss.append("接口地址")
-        if not self.api_key:
-            miss.append("API Key")
+            miss.append(i18n.T("接口地址"))
+        if not self.api_key and not self.key_optional():
+            miss.append(i18n.T("API Key"))
         if not self.model:
-            miss.append("模型名")
-        return "、".join(miss)
+            miss.append(i18n.T("模型名"))
+        # 分隔符不能写死「、」：英文界面下会显示成 "base URL、model"
+        return (", " if i18n.is_en() else "、").join(miss)
 
     # ---------------- 核心：一次对话 ----------------
     def chat(self, messages, max_tokens=None, json_mode=False, timeout=None):
@@ -429,7 +625,10 @@ class LLMClient:
         返回 (文本, usage 字典)。失败抛异常，由上层用 friendly_error 转成中文。
         """
         if not self.available():
-            raise RuntimeError("AI 接口未配置完整：缺少" + (self.missing_reason() or "参数"))
+            from . import i18n
+            raise RuntimeError(i18n.fmt("AI 接口未配置完整：缺少{miss}",
+                                        miss=self.missing_reason()
+                                        or i18n.T("参数")))
 
         payload = {
             "model": self.model,
@@ -476,29 +675,44 @@ class LLMClient:
         反过来也一样要防：推理型模型（v4-pro 这类）会把 token 全花在思考上，
         返回内容为空。这种「接口通但没输出」必须报失败，否则翻译出来整页空白。
         """
-        if not (self.base_url and self.api_key):
-            return {"ok": False, "msg": "请先填写接口地址和 API Key",
+        from . import i18n
+        if not self.base_url or (not self.api_key and not self.key_optional()):
+            return {"ok": False,
+                    "msg": i18n.fmt("请先填写{miss}", miss=self.missing_reason()),
                     "latency": 0, "models": []}
 
         models = []
+        probe_err = None
         t0 = time.time()
         try:
             data, _ = _get_json(self.base_url + "/models", self.api_key, timeout=15)
             models = [m.get("id", "") for m in (data.get("data") or []) if m.get("id")]
+            # 本机服务的模型名只有本机知道，测试时顺手把模型填上，
+            # 免得用户还要去命令行 ollama list 抄一遍
+            if self.is_local() and models and not self.model:
+                self.model = models[0]
             if models and self.model and self.model in models:
                 return {"ok": True, "models": models,
                         "latency": time.time() - t0,
-                        "msg": f"连接正常，该接口共 {len(models)} 个模型可用。"}
+                        "msg": i18n.fmt("连接正常，该接口共 {n} 个模型可用。",
+                                        n=len(models))}
         except urllib.error.HTTPError as e:
             if e.code in (401, 402, 403):
-                return {"ok": False, "msg": friendly_error(e), "latency": 0, "models": []}
+                return {"ok": False, "msg": friendly_error(e, self.base_url),
+                        "latency": 0, "models": []}
             # 其他情况（比如该服务商不提供 /models）继续走对话验证
-        except Exception:
-            pass
+            probe_err = e
+        except Exception as e:
+            probe_err = e
 
         # 用一次极短的对话验证模型是否真的可用
         if not self.model:
-            return {"ok": False, "msg": "接口能连通，但没有填写模型名",
+            # 不能一律写「接口能连通」。/models 都失败了还说连得上，
+            # 用户会去查模型名，而真正的问题（服务没启动、地址写错）在后面藏着。
+            if probe_err is not None:
+                return {"ok": False, "msg": friendly_error(probe_err, self.base_url),
+                        "latency": 0, "models": models}
+            return {"ok": False, "msg": i18n.T("接口能连通，但没有填写模型名"),
                     "latency": 0, "models": models}
         try:
             t0 = time.time()
@@ -506,19 +720,20 @@ class LLMClient:
                                     max_tokens=16, timeout=25)
             latency = time.time() - t0
         except Exception as e:
-            return {"ok": False, "msg": friendly_error(e), "latency": 0, "models": models}
+            return {"ok": False, "msg": friendly_error(e, self.base_url),
+                    "latency": 0, "models": models}
 
         if not content:
             return {"ok": False, "models": models, "latency": latency,
-                    "msg": ("接口能通，但模型没有返回任何内容。多半是推理型模型"
-                            "（如 deepseek-v4-pro / o 系列）把 token 都用在思考上了，"
-                            "换个 chat 系列的模型再试。")}
+                    "msg": i18n.T("接口能通，但模型没有返回任何内容。多半是推理型模型"
+                                  "（如 deepseek-v4-pro / o 系列）把 token 都用在思考上了，"
+                                  "换个 chat 系列的模型再试。")}
         extra = ""
         if models and self.model not in models:
-            extra = (f"\n服务商的模型列表里没有 {self.model}，但实测能正常调用，"
-                     "可以继续用。")
+            extra = i18n.fmt("\n服务商的模型列表里没有 {m}，但实测能正常调用，可以继续用。",
+                             m=self.model)
         return {"ok": True, "models": models, "latency": latency,
-                "msg": "连接正常，已用小请求确认模型能正常返回内容。" + extra}
+                "msg": i18n.T("连接正常，已用小请求确认模型能正常返回内容。") + extra}
 
     # ---------------- 余额查询 ----------------
     def query_balance(self):
@@ -526,18 +741,27 @@ class LLMClient:
         返回 {"ok": bool, "text": 展示文本, "amount": 数值或 None, "currency": "CNY"}
         只有服务商开放了余额接口才能查到，其余情况如实说明，不假装。
         """
+        from . import i18n
         kind = self.preset.get("balance_kind")
         url = self.preset.get("balance_url")
+        if self.is_local():
+            # 本机部署没有「余额」这个概念，不如把有用的信息给出去
+            return {"ok": False, "amount": None, "currency": "",
+                    "text": i18n.T("这是本机部署的模型，不产生费用，没有余额可查。"
+                                   "消耗的只是你自己的电和显卡。")}
         if not kind or not url:
             return {"ok": False, "amount": None, "currency": "",
-                    "text": f"{self.preset['label']} 没有开放余额查询接口，只能按消耗估算。"}
+                    "text": i18n.fmt("{name}没有开放余额查询接口，只能按消耗估算。",
+                                     name=preset_label(self.provider))}
         if not self.api_key:
-            return {"ok": False, "amount": None, "currency": "", "text": "请先填写 API Key"}
+            return {"ok": False, "amount": None, "currency": "",
+                    "text": i18n.T("请先填写 API Key")}
 
         try:
             data, raw = _get_json(url, self.api_key, timeout=20)
         except Exception as e:
-            return {"ok": False, "amount": None, "currency": "", "text": friendly_error(e)}
+            return {"ok": False, "amount": None, "currency": "",
+                    "text": friendly_error(e, url)}
 
         try:
             if kind == "deepseek":

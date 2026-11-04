@@ -16,6 +16,7 @@
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -26,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 
 from . import dict_engine
+from . import i18n
 from .llm_client import (LLMClient, PRESETS, preset_for, price_of)
 from .paths import DATA_DIR
 
@@ -39,6 +41,7 @@ FIXES_PATH = os.path.join(DATA_DIR, "fixes.csv")
 #   {0} {{name}}    模板占位残留
 GARBAGE_RE = re.compile(r"\[[a-z]{2,}\d|%[sd]\b|\{\{?\d*[a-z_]*\}?\}")
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
 NUM_RE = re.compile(r"\d+(?:[.\-/]\d+)*")
 
@@ -429,6 +432,194 @@ def convert_to_metric(text):
 
 
 # ===========================================================================
+# 公制 → 英制（输出单位选「英制」时才走这条路）
+# ===========================================================================
+# 为什么需要反方向：中文/公制图纸译给欧美客户看时，把 2000mm 原样留着，
+# 对方车间同样没法下料。换算方向由用户在下拉里定，两条路必须对称 ——
+# 对称的意思是：同样的容差、同样的校验、同样的标注版，不能一边认真一边糊弄。
+#
+# 只认写明了 mm / kg 的数值，裸数字一律不碰（和英制转公制同一条纪律）：
+# 把光秃秃的 50 当成 50mm 换成 2"，会把「50 号件」「50 件」全毁掉。
+_M_INV_IN = 1 / _M_IN
+_M_INV_LB = 1 / _M_LB
+
+_METRIC_NUM = r"\d[\d,]*(?:\.\d+)?"
+
+# 数值左边界在这边要宽松一点：中文译文里常写「Ø50mm」「R12.7mm」，
+# 也常写「尺寸50mm」—— 汉字紧贴数字是正常的，不能像英文那样挡。
+# 但必须挡住「M8」「DN50」这类代号：它们后面跟的不是 mm，其实天然不会匹配。
+_METRIC_RE = re.compile(
+    r"(?<![a-z0-9.,])"
+    r"(?P<num>" + _METRIC_NUM + r")\s*"
+    r"(?P<unit>[mM][mM]|毫米|[kK][gG]|千克|公斤)")
+
+_METRIC_RANGE_RE = re.compile(
+    r"(?<![a-z0-9.,])"
+    r"(?P<a>" + _METRIC_NUM + r")\s*(?P<dash>[–—~～])\s*"
+    r"(?P<b>" + _METRIC_NUM + r")\s*"
+    r"(?P<unit>[mM][mM]|毫米|[kK][gG]|千克|公斤)")
+
+# 中文写法的公制单位：25毫米 / 3千克 / 1.5 公斤
+CN_MET_RE = re.compile(
+    r"(?<![\d.])(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>毫米|千克|公斤)")
+
+
+def _fmt_inch(v):
+    """
+    毫米换算出来的英寸值 → 图纸上的写法。
+
+    优先给分数：欧美图纸的车间习惯是读 4-1/8" 而不是 4.13"，
+    给个小数对方还得自己换算成卷尺上的刻度。做法是在常见分母里找
+    一个误差够小的（0.002" ≈ 0.05mm，正好是我们对毫米的容差量级），
+    找到就用「整数-分子/分母」，找不到才退回两位小数 ——
+    大尺寸像 2000mm → 78.74"，分母 64 都对不齐，硬凑成 78-47/64"
+    反而没人看得懂。
+
+    小数值必须防「舍成 0」：公差 0.05mm 约等于 1/500 英寸，
+    round(0.002×64)=0，老代码会认下 0/64 并写出 0" ——
+    等于把公差抹成零公差，比不换算危险得多。
+    所以 0 这个解一律不收，宁可退到小数写法。
+    """
+    if v < 0:
+        return "-" + _fmt_inch(-v)
+    if v == 0:
+        return "0"
+    for d in (64, 32, 16, 8, 4, 2):
+        n = round(v * d)
+        if n == 0:
+            # 这个分母表达不了这么小的值，换个更粗的分母也是 0，直接退小数
+            continue
+        if abs(n / d - v) <= 0.002:
+            whole, rem = divmod(int(n), d)
+            if rem == 0:
+                return f"{whole}"
+            g = math.gcd(rem, d)
+            rem //= g
+            d //= g
+            return f"{whole}-{rem}/{d}" if whole else f"{rem}/{d}"
+    # 小于 1/128 英寸（约 0.2mm）的细公差，分数写不出来，用小数并保住有效位：
+    # 固定两位会把 0.002" 抹成 0.00"，等于没换算。位数加到结果不为 0 为止。
+    for dec in (3, 4, 5):
+        s = f"{v:.{dec}f}"
+        if float(s) > 0:
+            break
+    # 三位小数末尾那个 0 是凑位数用的（78.740 / 0.020），抹掉更好读；
+    # 只抹第三位之后的，两位小数保留 —— 小数点后一位的 0.50" 要留着
+    if len(s.split(".")[-1]) > 2 and s.endswith("0"):
+        s = s[:-1]
+    return s
+
+
+def _fmt_inch_text(v):
+    """带英寸符号。符号用 ASCII 直引号：CAD 和老打印机对它兼容最好"""
+    return _fmt_inch(v) + '"'
+
+
+def _fmt_lb(v):
+    """磅统一两位小数。末尾零保留，理由同毫米（精度含义要写明白）"""
+    d = Decimal(repr(round(v, 9))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{d:.2f}"
+
+
+def has_metric(text):
+    """这句里有没有要换算的公制量。用来决定要不要处理，避免误伤无关文本"""
+    if not text:
+        return False
+    return bool(_METRIC_RE.search(text) or CN_MET_RE.search(text))
+
+
+def convert_to_imperial(text):
+    """
+    公制换算成英制。顺序同 convert_to_metric：先中文单位词、再范围、再单值。
+
+    范围要整体处理：写「10–12 mm」时如果逐值替换，会得到
+    「0.39"–12"」这种事 —— 前一个换了、后一个还是毫米的数值顶着英寸符号。
+    """
+    if not text:
+        return text
+
+    def _plan(unit):
+        u = unit.lower()
+        if u in ("mm", "毫米"):
+            return _M_INV_IN, "in"
+        return _M_INV_LB, "lb"
+
+    def _out(val, kind):
+        return _fmt_inch_text(val) if kind == "in" else _fmt_lb(val) + " lb"
+
+    # 0) 中文单位词
+    def repl_cn(m):
+        try:
+            val = float(m.group("num"))
+        except Exception:
+            return m.group(0)
+        factor, kind = _plan(m.group("unit"))
+        return _out(val * factor, kind)
+
+    text = CN_MET_RE.sub(repl_cn, text)
+
+    # 1) 范围
+    def repl_range(m):
+        factor, kind = _plan(m.group("unit"))
+        try:
+            a = float(m.group("a").replace(",", ""))
+            b = float(m.group("b").replace(",", ""))
+        except Exception:
+            return m.group(0)
+        dash = m.group("dash")
+        if kind == "in":
+            return f"{_fmt_inch_text(a * factor)}{dash}{_fmt_inch_text(b * factor)}"
+        return f"{_fmt_lb(a * factor)}{dash}{_fmt_lb(b * factor)} lb"
+
+    text = _METRIC_RANGE_RE.sub(repl_range, text)
+
+    # 2) 单值
+    def repl(m):
+        factor, kind = _plan(m.group("unit"))
+        try:
+            val = float(m.group("num").replace(",", ""))
+        except Exception:
+            return m.group(0)
+        return _out(val * factor, kind)
+
+    return _METRIC_RE.sub(repl, text)
+
+
+# 输出单位模式。三个值贯穿「换算 → 校验 → 单位声明 → 标注版」整条链，
+# 任何一环按默认公制硬编码，都会造出自相矛盾的文件。
+UNIT_METRIC = "metric"
+UNIT_IMPERIAL = "imperial"
+UNIT_KEEP = "keep"
+UNIT_MODES = (UNIT_METRIC, UNIT_IMPERIAL, UNIT_KEEP)
+
+
+def normalize_unit_mode(mode):
+    """配置里存的值可能是手改过的怪东西，一律折回合法值"""
+    return mode if mode in UNIT_MODES else UNIT_METRIC
+
+
+def convert_units(text, mode=UNIT_METRIC):
+    """按选定单位换算一条文本。三个模式的唯一入口"""
+    if not text:
+        return text
+    if mode == UNIT_IMPERIAL:
+        return convert_to_imperial(text)
+    if mode == UNIT_KEEP:
+        return text
+    return convert_to_metric(text)
+
+
+def units_changed(src, out, mode=UNIT_METRIC):
+    """这条译文相对原文有没有真的发生单位变化。标注版和单位声明都靠它判断"""
+    if not src or not out:
+        return False
+    try:
+        return convert_units(src, mode) != src
+    except Exception:
+        return False
+
+
+# ===========================================================================
 # 换算结果的校验：算完之后不能再信自己，必须用另一条路复算一遍
 # ===========================================================================
 # 为什么换算了还要验：
@@ -445,26 +636,66 @@ def convert_to_metric(text):
 # 那时候改哪个数都是猜，改错比不改更糟。
 
 def _kind_cn(kind):
-    """mm / kg 说成人话，写进校验清单时要给用户看"""
-    return "质量" if kind == "kg" else "长度"
+    """mm / kg 说成人话，写进校验清单时要给用户看。
+
+    kind 在内部只表示「这是长度还是质量」，不表示单位本身 ——
+    英制模式下同一个长度量写出来是 4-1/8" 而不是 104.78mm，
+    但校验、配对、容差的逻辑完全一致，所以类别标签沿用一个。
+    """
+    return i18n.T("质量") if kind == "kg" else i18n.T("长度")
 
 
-def _fmt_value(kind, v):
-    """按单位选格式化函数，保证校验改出来的值和换算通道的位数一致"""
+def _fmt_value(kind, v, mode=UNIT_METRIC):
+    """按模式选格式化函数，保证校验改出来的值和换算通道的位数一致"""
+    if mode == UNIT_IMPERIAL:
+        return _fmt_lb(float(v)) if kind == "kg" else _fmt_inch(float(v))
     return _fmt_kg(float(v)) if kind == "kg" else _fmt_metric(float(v))
 
 
-def _extract_metric_values(text):
+# 译文里的英制数值。分数写法（4-1/8"）必须整体吃进来，
+# 否则只抓到 1/8 会把两个值都判成错。
+_IMPERIAL_FMT_RE = re.compile(
+    r"(?<![a-z0-9./\-])"
+    r"(?P<num>\d+(?:\.\d+)?(?:\s*-\s*\d+/\d+)?)(?P<sp>\s*)"
+    # 裸 in 必须排除「4 in the box」这种介词用法：后面跟空格 + 小写单词的一律不认。
+    # 这和输入侧 IN_ABBR_RE 只认 in. / 全大写 IN 是同一条纪律的两面。
+    r"(?P<unit>\"|″|”|''|[iI][nN](?![A-Za-z])(?!\s+[a-z])"
+    r"|[iI][nN]\.|[iI][nN][cC][hH][eE][sS]?)")
+
+
+def _extract_metric_values(text, mode=UNIT_METRIC):
     """
-    抽出文本里所有带 mm / kg 后缀的数值。
+    抽出文本里所有换算后的数值。
+
+    metric   → 认 mm / kg
+    imperial → 认 4-1/8"、78.74"、11.34 lb
 
     返回 [(kind, Decimal 值, 起点, 终点, 原始写法)]。
     带坐标是为了改的时候能精确替换数字本身，不动后面的空格和单位。
-    只认带 mm / kg 后缀的：DN50、M8×30、Ø50、Rev E 这些代号碰不得。
+    只认带单位的：DN50、M8×30、Ø50、Rev E 这些代号碰不得。
     """
     out = []
     if not text:
         return out
+
+    if mode == UNIT_IMPERIAL:
+        for m in _IMPERIAL_FMT_RE.finditer(text):
+            try:
+                v = Decimal(repr(_imp_value(m.group("num"))))
+            except Exception:
+                continue
+            kind = "kg" if m.group("unit").lower().startswith("lb") else "mm"
+            out.append((kind, v, m.start("num"), m.end("num"), m.group(0)))
+        # 磅单独再扫一遍：上面那条正则的 unit 分支只为英寸而写
+        for m in _IMPERIAL_LB_RE.finditer(text):
+            try:
+                v = Decimal(m.group(1))
+            except Exception:
+                continue
+            out.append(("kg", v, m.start(1), m.end(1), m.group(0)))
+        out.sort(key=lambda x: x[2])
+        return out
+
     for m in _METRIC_FMT_RE.finditer(text):
         try:
             v = Decimal(m.group(1))
@@ -474,16 +705,26 @@ def _extract_metric_values(text):
     return out
 
 
-def _metric_tol(kind, expect):
+_IMPERIAL_LB_RE = re.compile(
+    r"(?<![a-z0-9.])(\d+(?:\.\d+)?)\s*(?:[lL][bB][sS]?|[pP][oO][uU][nN][dD][sS]?)(?![A-Za-z])")
+
+
+def _metric_tol(kind, expect, mode=UNIT_METRIC):
     """
     允许多大误差算「对得上」。
 
     mm：0.05mm 或 0.5% 取大者。1/16" 换算成 1.59mm，模型写 1.6 也该放过。
     kg：0.002kg（2 克）或 0.5% 取大者 —— 小于 1kg 的值走三位小数，
         1 克的粒度不能被判成错。
+    imperial：英寸 0.002"（≈0.05mm），磅 0.005 —— 和公制侧同一物理精度，
+        不能因为换了单位就放松，否则 4-1/8" 写成 4" 会被当成误差内放过。
     容差不能放宽到「差不多就行」：图纸上 104.78 和 105 差 0.22mm，
     看着无所谓，实际是两条不同的料。
     """
+    if mode == UNIT_IMPERIAL:
+        if kind == "kg":
+            return max(Decimal("0.005"), abs(expect) * Decimal("0.005"))
+        return max(Decimal("0.002"), abs(expect) * Decimal("0.005"))
     if kind == "kg":
         return max(Decimal("0.002"), abs(expect) * Decimal("0.005"))
     return max(Decimal("0.05"), abs(expect) * Decimal("0.005"))
@@ -548,31 +789,34 @@ class MetricReport:
     def summary(self):
         """给状态条用的一行字"""
         if not self.checked and not self.issues:
-            return "计量数据校验：本份文件没有可换算的数值"
-        s = f"计量数据校验：复算 {self.checked} 条"
+            return i18n.T("计量数据校验：本份文件没有可换算的数值")
+        s = i18n.fmt("计量数据校验：复算 {n} 条", n=self.checked)
         if self.fixed:
-            s += f" · 自动纠正 {self.fixed} 处"
+            s += i18n.fmt(" · 自动纠正 {n} 处", n=self.fixed)
         if self.warned:
-            s += f" · 需人工确认 {self.warned} 处"
+            s += i18n.fmt(" · 需人工确认 {n} 处", n=self.warned)
         if not self.fixed and not self.warned:
-            s += " · 全部一致"
+            s += i18n.T(" · 全部一致")
         return s
 
     def has_warning(self):
         return any(i[0] != "fix" for i in self.issues)
 
 
-def verify_metric_output(src, out, lang="en", page=None, report=None):
+def verify_metric_output(src, out, dst="zh", page=None, report=None,
+                         mode=UNIT_METRIC):
     """
     校验一条译文的计量数据，能改的直接改，改不了的记下来。
 
     参数
       src     原文
       out     已换算、已规范化的译文
-      lang    方向，只用于记录，不改变校验规则（两个方向的期望值算法一致：
-              先把原文换成公制再抽值，原文本来就是 mm/kg 的自然原样保留）
+      dst     目标语言，只用于记录，不改变校验规则（两个方向的期望值算法一致：
+              先把原文换成目标单位再抽值，原文本来就是目标单位的自然原样保留）
       page    页码，写清单用
       report  MetricReport，累积统计
+      mode    输出单位。keep 模式直接跳过 —— 用户选的「不换算」，
+              这里再去补算就是把他的选择推翻了
 
     返回 (修正后的译文, [(level, page, src, out, detail), ...])
     """
@@ -583,7 +827,7 @@ def verify_metric_output(src, out, lang="en", page=None, report=None):
         if report is not None:
             report.add(level, page, src or "", out, detail)
 
-    if not out or not out.strip():
+    if not out or not out.strip() or mode == UNIT_KEEP:
         return out, issues
 
     fixed = out
@@ -591,31 +835,34 @@ def verify_metric_output(src, out, lang="en", page=None, report=None):
     # ---- 1) 小数位复核 ----
     # 出口已经抹过一遍，这里是第二道。留着它的理由：万一以后有人改了出口顺序，
     # 或者 AI 通道的文本在上一步被别的东西重写过，这里还能兜住。
-    nf = normalize_metric_format(fixed)
-    if nf != fixed:
-        note("fix", "小数位不符合规定位数，已统一")
-        fixed = nf
+    # 英制侧没有这道：英寸是「整数-分数」，没有统一小数位可抹。
+    if mode == UNIT_METRIC:
+        nf = normalize_metric_format(fixed)
+        if nf != fixed:
+            note("fix", i18n.T("小数位不符合规定位数，已统一"))
+            fixed = nf
 
     # ---- 2) 漏换算复核 ----
-    # convert_to_metric 对白名单（NPT 1/2"、1/4"-20）不动，所以「再跑一遍有没有变化」
+    # convert_units 对白名单（NPT 1/2"、1/4"-20）不动，所以「再跑一遍有没有变化」
     # 精确对应「还有该换没换的」，不会把故意保留的螺纹代号误报成漏换算。
-    cf = convert_to_metric(fixed)
+    cf = convert_units(fixed, mode)
     if cf != fixed:
-        note("fix", "有英制数值没换算，已补算")
-        fixed = normalize_metric_format(cf)
+        note("fix", i18n.T("有英制数值没换算，已补算") if mode == UNIT_METRIC
+             else i18n.T("有公制数值没换算，已补算"))
+        fixed = normalize_metric_format(cf) if mode == UNIT_METRIC else cf
 
     # ---- 3) 复算比对 ----
-    # 期望值 = 把原文按同一套规则换算后抽出来的公制值。
-    # 原文本来就是 mm/kg 的，convert 不动它，于是「原文公制是否忠于原值」
-    # 和「英制换算对不对」用同一条路径覆盖了。
-    expected = _extract_metric_values(convert_to_metric(src or ""))
+    # 期望值 = 把原文按同一套规则换算后抽出来的目标单位值。
+    # 原文本来就是目标单位的，convert 不动它，于是「原文数值是否忠于原值」
+    # 和「换算对不对」用同一条路径覆盖了。
+    expected = _extract_metric_values(convert_units(src or "", mode), mode)
     if not expected:
         return fixed, issues
 
     if report is not None:
         report.checked += 1
 
-    actual = _extract_metric_values(fixed)
+    actual = _extract_metric_values(fixed, mode)
     changes = []        # (起点, 终点, 新数值文本)
 
     for kind in ("mm", "kg"):
@@ -624,14 +871,15 @@ def verify_metric_output(src, out, lang="en", page=None, report=None):
         if not exp_g:
             continue
         if not act_g:
-            note("warn",
-                 f"原文有 {len(exp_g)} 处{_kind_cn(kind)}数值，译文里找不到 {kind} "
-                 f"（应为 {_fmt_value(kind, exp_g[0][1])}{kind} 等），需人工确认")
+            note("warn", i18n.fmt(
+                "原文有 {n} 处{kind}数值，译文里找不到对应数值（应为 {v} 等），需人工确认",
+                n=len(exp_g), kind=_kind_cn(kind),
+                v=_fmt_value(kind, exp_g[0][1], mode)))
             continue
 
         pairs = _pair_by_value(exp_g, act_g)
         bad = [(e, a, d) for e, a, d in pairs
-               if a is not None and d > _metric_tol(kind, e[1])]
+               if a is not None and d > _metric_tol(kind, e[1], mode)]
 
         # 同句里同单位的个数必须一致才敢改数。
         # 个数不一致说明模型增删或合并了数值，配对本身就不可信 ——
@@ -640,19 +888,21 @@ def verify_metric_output(src, out, lang="en", page=None, report=None):
         # 译文把两个尺寸合并成一个（3-3/4" x 1-1/2" → 95.25mm）时，
         # 剩下的那个值往往是准的，误差检查会全部通过，静默放行就漏了。
         if len(exp_g) != len(act_g):
-            note("warn",
-                 f"本句{_kind_cn(kind)}数量对不上（原文 {len(exp_g)} 处 / 译文 {len(act_g)} 处），"
-                 f"可能有数值被漏算或合并，需人工核对")
+            note("warn", i18n.fmt(
+                "本句{kind}数量对不上（原文 {a} 处 / 译文 {b} 处），"
+                "可能有数值被漏算或合并，需人工核对",
+                kind=_kind_cn(kind), a=len(exp_g), b=len(act_g)))
             for e, a, d in bad:
-                note("warn",
-                     f"译文 {a[4]} 与复算值 {_fmt_value(kind, e[1])}{kind} 不符，未自动修改")
+                note("warn", i18n.fmt(
+                    "译文 {got} 与复算值 {exp} 不符，未自动修改",
+                    got=a[4], exp=_fmt_value(kind, e[1], mode)))
             continue
 
         for e, a, d in bad:
-            newv = _fmt_value(kind, e[1])
+            newv = _fmt_value(kind, e[1], mode)
             changes.append((a[2], a[3], newv))
-            note("fix",
-                 f"{a[4]} → {newv}{kind}（按原文 {e[4].strip()} 复算）")
+            note("fix", i18n.fmt("{got} → {new}（按原文 {src} 复算）",
+                                 got=a[4], new=newv, src=e[4].strip()))
 
     if changes:
         # 从后往前替换，避免前面的改动把后面坐标撑歪
@@ -690,6 +940,16 @@ def default_config():
         },
         "online_fallback": True,
         "min_font_scale": 0.62,
+        # 翻译方向与输出单位。老配置文件里没有这一段，
+        # 默认值必须与改造前的行为逐字一致，否则用户升级完发现图纸全变了：
+        #   src=auto 每条文字自己判断是中还是英
+        #   dst=auto 中→英、英→中，方向相反着来（原来的行为）
+        #   units=metric 英制一律换算成毫米/千克
+        "translate": {
+            "src": "auto",
+            "dst": "auto",
+            "units": UNIT_METRIC,
+        },
     }
 
 
@@ -709,8 +969,15 @@ def load_config():
             # enabled 是历史遗留开关，老配置文件里没有这个键，而默认配置兜的是
             # False。只要存了 key 就说明用户是想用的，这里补成 True —— 否则界面上
             # 永远显示「AI 接口：未配置」，用户会以为自己的 key 没生效（踩过）
+            #
+            # 本机部署是个例外：它本来就不填 key，拿「有没有 key」判启用会把它
+            # 判成未配置，用户选完本机模型、保存、重启，功能就没了。
             if "enabled" not in (saved.get("llm") or {}):
-                cfg["llm"]["enabled"] = bool(cfg["llm"].get("api_key"))
+                from .llm_client import is_local_url
+                llm = cfg["llm"]
+                llm["enabled"] = (bool(llm.get("api_key"))
+                                  or llm.get("provider") == "local"
+                                  or is_local_url(llm.get("base_url") or ""))
         except Exception:
             pass
     return cfg
@@ -745,6 +1012,71 @@ class Translator:
         self.metric_report = MetricReport()
         # 当前正在处理的页码，由 pdf_engine 每页写一次，只用于给校验清单标页码
         self.page_no = None
+        # 方向与输出单位。三项都存在 cfg["translate"] 里，界面改完调 set_direction
+        self._load_direction()
+
+    def _load_direction(self):
+        tr = (self.cfg or {}).get("translate") or {}
+        self.src_lang = tr.get("src") or "auto"
+        self.dst_lang = tr.get("dst") or "auto"
+        self.unit_mode = normalize_unit_mode(tr.get("units"))
+
+    def set_direction(self, src=None, dst=None, units=None, save=True):
+        """
+        界面上的三个下拉改了就调这里，热生效，不用重启。
+
+        为什么单位和方向要放到同一个方法：它们共享同一条出口逻辑
+        （换算 → 校验 → 标注），分开设会出现「方向已经变了、校验还按老方向算」
+        的半截状态，正好落在一次转换中间时最难排查。
+        """
+        tr = self.cfg.setdefault("translate", {})
+        if src is not None:
+            self.src_lang = src
+            tr["src"] = src
+        if dst is not None:
+            self.dst_lang = dst
+            tr["dst"] = dst
+        if units is not None:
+            self.unit_mode = normalize_unit_mode(units)
+            tr["units"] = self.unit_mode
+        if save:
+            try:
+                save_config(self.cfg)
+            except Exception:
+                pass
+
+    def _resolve(self, hint):
+        """
+        一条文字该从什么语言译到什么语言。返回 (src, dst)，dst 为 None 表示不翻。
+
+        hint 是 pdf_engine 用 detect_lang 认出来的语言（zh / en / none）。
+        三条规则：
+          1. 源语言选「自动」→ 信 hint；
+          2. 源语言选了具体语种 → 只翻这种语言的条目，别的原样留着
+             （图纸里混着型号、英文缩写是常态，全翻会把代号毁掉）；
+          3. 目标语言选「自动」→ 翻成**系统语言**（见 i18n.auto_target）。
+             以前这里是「中译英、英译反」，等于假设用户母语非中即英；
+             日本用户拿英文图纸时，那条规则会给他中文版，明显不对。
+        """
+        if self.src_lang == "auto":
+            src = hint if hint in ("zh", "en") else ""
+        else:
+            src = self.src_lang
+            # 选了中/英这种能认出来的语种时，按 hint 过滤；
+            # 选了德/法/日这种认不出来的，只能全认（宁可多翻，不要漏翻）
+            if src in ("zh", "en") and hint != src:
+                return src, None
+            if src not in i18n.CODES:
+                src = ""
+
+        dst = self.dst_lang
+        if dst == "auto":
+            dst = i18n.auto_target()
+        # 原文已经是目标语言时不用翻。这里刻意不回退成「另一种语言」：
+        # 英文用户拿英文图纸，正确结果就是原样不动，而不是偷偷给他中文版
+        if not src or src == dst:
+            return src, None
+        return src, dst
 
     # ---------------- AI 客户端 ----------------
     def _make_client(self):
@@ -839,24 +1171,29 @@ class Translator:
             pass
 
     # ---------------- 第二层：本地词典 ----------------
-    def _dict_translate(self, text, lang):
+    def _dict_translate(self, text, src, dst):
         """
         返回 (译文, 未命中占比)
         未命中占比 = 未翻译字符数 / 总有效字符数
+
+        词典只有中↔英两张表。西班牙语、日语这些方向直接返回空 ——
+        硬拿英文词典去拼只会拼出不伦不类的东西，交给 AI 更省钱。
         """
-        if lang == "zh":
+        if (src, dst) == ("zh", "en"):
             out, miss = dict_engine.zh_to_en(text, self.glossary)
             total = max(len(re.sub(r"\s", "", text)), 1)
             ratio = len(miss) / total
-        else:
+            return out, ratio
+        if (src, dst) == ("en", "zh"):
             out, miss = dict_engine.en_to_zh(text, self.glossary)
             words = [w for w in re.findall(r"[A-Za-z]+", text)]
             total = max(len(words), 1)
             ratio = len(miss) / total
-        return out, ratio
+            return out, ratio
+        return "", 1.0
 
     # ---------------- 第四层：在线免费接口 ----------------
-    def _online_translate(self, text, lang, throttle=True):
+    def _online_translate(self, text, src, dst, throttle=True):
         """
         MyMemory 免费接口。实测是国内网络下唯一免 key 且稳定的通道。
         但它有硬配额，密集请求会直接 429 封掉，所以一旦撞上就把本批全部标记为限流，
@@ -865,9 +1202,12 @@ class Translator:
         if self._rate_limited:
             return None
 
-        src, dst = ("zh-CN", "en") if lang == "zh" else ("en", "zh-CN")
+        sc = i18n.ONLINE_CODE.get(src)
+        dc = i18n.ONLINE_CODE.get(dst)
+        if not sc or not dc:
+            return None
         q = urllib.parse.quote(text[:480])   # 接口单次有长度上限
-        url = f"https://api.mymemory.translated.net/get?q={q}&langpair={src}|{dst}"
+        url = f"https://api.mymemory.translated.net/get?q={q}&langpair={sc}|{dc}"
 
         if throttle:
             wait = 0.6 - (time.time() - self._last_online_call)
@@ -922,32 +1262,48 @@ class Translator:
         hits.sort(key=lambda p: -len(p[0]))
         return hits
 
-    def _build_messages(self, batch, lang_hint):
+    def _unit_rule_block(self):
         """
-        组请求。系统提示词是翻译质量的核心，逐条都对应过实际踩的坑：
-          - 长句必须按中文语序重写，否则出来的是「机翻腔」，读不懂
-          - 尺寸必须真的换算（英寸→毫米），不是把单位字母换掉；但螺纹规格、
-            标准号、型号这类代号一改就成了另一个零件，碰都不能碰
-          - 短标注不加"的"、不加句号，图纸上没这个空间
-        """
-        hints = self._glossary_hints([b[0] for b in batch])
-        term_block = ""
-        if hints:
-            term_block = "\n参考术语表（这些词的译法必须严格遵守，不许自创）：\n" + \
-                         "；".join(f"{en}={zh}" for en, zh in hints)
+        提示词里的单位换算条款。三种输出单位各写一段。
 
-        system = (
-            "你是资深工程图纸翻译，长期为机械、五金、建材、护栏围栏类图纸做中英互译。"
-            "你的译文会直接印在图纸上替换原文，读者是车间工人和安装人员。"
-            "所有图纸最终以公制（毫米）为准。\n"
-            "必须遵守：\n"
-            "1. 术语用行业标准说法，不用日常义。例：collar=锁紧环（不是衣领/项圈）、"
-            "sleeve=套管（不是袖子）、post=立柱、rail=横梁、brace=斜撑、foot=底座、"
-            "upright=立杆、gate=门扇、hinge=铰链、clevis pin=U形夹销、padlock=挂锁、"
-            "panel=面板、channel=槽钢、swivel=旋转节、liner=衬垫。\n"
-            "2. 长句必须译成通顺的中文，按中文语序重写，不要逐字直译、不要带英文句式。"
-            "读起来要像中国工程师写的安装说明，能直接照着做。\n"
-            "3. 短标注（几个词）译成简洁术语：不加「的」，不加句号，不添加原文没有的解释。\n"
+        为什么要写进提示词而不是全靠出口的正则：AI 通道是整句重写，
+        模型顺手就把「4-1/8" high」写成「4-1/8" 高」—— 它压根没算，
+        等出口正则去补，量出来的数值和它写在同一句里，格式容易打架。
+        提示词先说清楚，出口再兜一道，两层都不省。
+        """
+        en = i18n.is_en()
+        if self.unit_mode == UNIT_KEEP:
+            return ("4. Keep every dimension and weight exactly as written, unit included. "
+                    "Convert nothing: 2000mm stays 2000mm, 4-1/8\" stays 4-1/8\"."
+                    if en else
+                    "4. 保持原文的计量单位与数值，一个数都不要换算："
+                    "2000mm 仍是 2000mm，4-1/8\" 仍是 4-1/8\"。")
+        if self.unit_mode == UNIT_IMPERIAL:
+            if en:
+                return (
+                    "4. Convert every dimension into inches and every mass into pounds. "
+                    "1 mm = 0.03937 in, 1 kg = 2.20462 lb. Write inches as the fractions used "
+                    "on drawings (denominators 2/4/8/16/32/64): 104.78mm → 4-1/8\"; "
+                    "19.05mm → 3/4\"; 25.40mm → 1\". Use two decimals when no clean fraction "
+                    "exists (e.g. 78.74\"). Pounds to two decimals.")
+            return (
+                "4. 尺寸、长度一律换算成英寸，重量换算成磅。1 毫米=0.03937 英寸，"
+                "1 千克=2.20462 磅。英寸用图纸惯用的分数写法，分母取 2/4/8/16/32/64 "
+                "中最接近的那个：104.78mm 写 4-1/8\"；19.05mm 写 3/4\"；"
+                "25.40mm 写 1\"。大尺寸凑不整齐数时保留两位小数（如 78.74\"）。"
+                "磅保留两位小数。")
+        if en:
+            return (
+                "4. Convert every dimension, length and weight into metric. Actually compute the "
+                "number — do not merely swap the unit letters. Rates: 1 inch = 25.4 mm, "
+                "1 foot = 304.8 mm, 1 pound = 0.45359237 kg, 1 ounce = 0.0283495 kg. "
+                "Dimensions in millimetres, mass in kilograms (ounces also to kg), never metres.\n"
+                "   Number format: dimensions always 2 decimals; mass 2 decimals at or above "
+                "1 kg, 3 decimals below 1 kg. Keep trailing zeros: 4-1/8\" → 104.78mm; "
+                "3/4\" → 19.05mm; 2' → 609.60mm; ±1/16\" → ±1.59mm; 1\" → 25.40mm; "
+                "25 lb → 11.34kg; 8 oz → 0.227kg; 1 oz → 0.028kg.\n"
+                "   Never render ft/inch/lb/oz as words only — that changes nothing numerically.")
+        return (
             "4. 尺寸、长度、重量这些计量数据一律换算成公制，不是换掉单位字母，"
             "是把数值真算出来。换算率：1 英寸=25.4 毫米，1 英尺=304.8 毫米，"
             "1 磅=0.45359237 千克，1 盎司=0.0283495 千克。"
@@ -960,29 +1316,98 @@ class Translator:
             "8 oz 写 0.227kg；1 oz 写 0.028kg。\n"
             "   特别注意：不许把 ft、inch、lb、oz 只译成「英尺、英寸、磅、盎司」。"
             "那只是换了个说法，数值一个没动，等于没换算 —— 图纸上印着「9英尺」"
-            "国内车间没法用。见到这几种单位，一律按第 4 条算成 mm 或 kg 再写。\n"
+            "国内车间没法用。见到这几种单位，一律按第 4 条算成 mm 或 kg 再写。")
+
+    def _system_prompt(self):
+        """
+        系统提示词。中文界面出中文提示词、英文界面出英文提示词。
+
+        为什么跟界面语言走而不是跟翻译方向走：国际版用户多半挂着 OpenAI/Claude，
+        英文提示词对它们最省事；中文用户挂 DeepSeek/通义，中文提示词最稳。
+        界面语言正好就是「这个人习惯哪种语言」的最准信号。
+        """
+        rule = self._unit_rule_block()
+        if i18n.is_en():
+            return (
+                "You are a senior engineering-drawing translator working on mechanical, hardware, "
+                "building-material and fence/railing drawings. Your output is printed on the drawing "
+                "in place of the original; readers are shop-floor workers and installers.\n"
+                "Rules:\n"
+                "1. Use standard industry terminology, never everyday meanings: collar=locking collar "
+                "(not shirt collar), sleeve=bushing (not clothing sleeve), post=post/upright, "
+                "rail=rail, brace=brace, foot=base plate, gate=gate leaf, hinge=hinge, "
+                "clevis pin=clevis pin, padlock=padlock, panel=panel, channel=channel, "
+                "swivel=swivel, liner=liner.\n"
+                "2. Long sentences must read naturally in the target language. Rewrite in that "
+                "language's word order; no word-for-word translation. It must read like "
+                "installation instructions written by a local engineer.\n"
+                "3. Short labels: concise term only. No articles, no trailing period, no "
+                "explanations that are not in the source.\n"
+                + rule + "\n"
+                "5. These are part numbers and codes: never convert or rewrite them, copy verbatim — "
+                "thread and fastener specs (1/4\"-20, M8x30, NPT 1/2), standards (ANSI, ASTM, DIN, "
+                "GB, EN), model and drawing numbers (Rev E, A-3, DN50, SCH40), material grades, "
+                "dates, page numbers.\n"
+                "6. In Chinese, \"寸\" used for pipes is a nominal size, not inches — write DN25, "
+                "DN32, DN40, DN50, DN80, DN100 for 1, 1.2, 1.5, 2, 3, 4 寸.\n"
+                "7. Do not leave words from the source language in the output (part numbers, units, "
+                "standard codes and drawing numbers excepted). When translating into Chinese, render "
+                "O.D. as 外径, I.D. as 内径, THK as 厚度.\n"
+                "8. Keep one consistent rendering per term across the whole drawing.\n"
+                "9. Output JSON only, no prose.\n"
+                "Format: [{\"id\":0,\"text\":\"translation\"}]")
+        return (
+            "你是资深工程图纸翻译，长期为机械、五金、建材、护栏围栏类图纸做多语种互译。"
+            "你的译文会直接印在图纸上替换原文，读者是车间工人和安装人员。\n"
+            "必须遵守：\n"
+            "1. 术语用行业标准说法，不用日常义。例：collar=锁紧环（不是衣领/项圈）、"
+            "sleeve=套管（不是袖子）、post=立柱、rail=横梁、brace=斜撑、foot=底座、"
+            "upright=立杆、gate=门扇、hinge=铰链、clevis pin=U形夹销、padlock=挂锁、"
+            "panel=面板、channel=槽钢、swivel=旋转节、liner=衬垫。\n"
+            "2. 长句必须译成通顺的目标语言，按目标语言的语序重写，不要逐字直译。"
+            "读起来要像当地工程师写的安装说明，能直接照着做。\n"
+            "3. 短标注（几个词）译成简洁术语：不加助词，不加句号，不添加原文没有的解释。\n"
+            + rule + "\n"
             "5. 以下是标准件代号或编号，绝对不能换算、不能改写，原样照抄："
             "螺纹与紧固件规格（1/4\"-20、M8×30、NPT 1/2）、标准号（ANSI、ASTM、DIN、GB、EN）、"
             "型号与图号（Rev E、A-3、DN50、SCH40）、材料牌号、日期、页码。\n"
             "6. 中文里的「寸」用在管材（钢管、方管、圆管）上是俗称，不是英寸，"
             "要按公称直径写：1寸=DN25、1.2寸=DN32、1.5寸=DN40、2寸=DN50、3寸=DN80、4寸=DN100。"
             "这种地方写 DN 口径，不要写换算出来的毫米数。\n"
-            "7. 两个方向的写法要求：中文图纸译成英文时，用图纸惯用的英文大写短句，"
-            "原文的公制数值保持公制，不要倒过来转成英制；"
-            "但中文原文里如果本身写的就是英制（8 ft、6\"、25 lb），"
-            "那属于「原文是英制」，照样按第 4 条换算成 mm/kg。"
-            "英文图纸译成中文时，"
-            "译文里不许留英文单词（型号、单位、标准号、图号除外），"
-            "并且要把 O.D. 译成外径、I.D. 译成内径、THK 译成厚度。\n"
+            "7. 译文里不许残留源语言的词汇（型号、单位、标准号、图号除外）。"
+            "译成中文时要把 O.D. 译成外径、I.D. 译成内径、THK 译成厚度。\n"
             "8. 同一份图纸内同一术语必须译法统一。\n"
             "9. 只输出 JSON，不要任何解释文字。\n"
-            "输出格式：[{\"id\":0,\"text\":\"译文\"}]"
-        )
-        payload = [{"id": i, "text": t, "target": LANG_NAME.get(l, "中文")}
-                   for i, (t, l) in enumerate(batch)]
-        user = ("把下面每条文字翻译成对应目标语言。" + term_block +
-                "\n\n待译内容：\n" + json.dumps(payload, ensure_ascii=False))
-        return [{"role": "system", "content": system},
+            "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
+
+    def _build_messages(self, batch):
+        """
+        组请求。batch 的每一项是 (原文, 源语言, 目标语言)。
+
+        目标语言放在每条的 target 字段里，而不是写死在系统提示词里：
+        选「自动」时同一页可能中英混排，两个方向要同时进行，
+        系统提示词只能给规则，方向得逐条说。
+        """
+        hints = self._glossary_hints([b[0] for b in batch])
+        term_block = ""
+        if hints:
+            if i18n.is_en():
+                term_block = ("\nReference glossary (these renderings are mandatory, do not invent "
+                              "your own):\n" + "; ".join(f"{en}={zh}" for en, zh in hints))
+            else:
+                term_block = "\n参考术语表（这些词的译法必须严格遵守，不许自创）：\n" + \
+                             "；".join(f"{en}={zh}" for en, zh in hints)
+
+        payload = [{"id": i, "text": t, "target": i18n.prompt_name(d)}
+                   for i, (t, _s, d) in enumerate(batch)]
+        if i18n.is_en():
+            user = ("Translate each item below into the target language given in its own "
+                    "\"target\" field." + term_block +
+                    "\n\nItems:\n" + json.dumps(payload, ensure_ascii=False))
+        else:
+            user = ("把下面每条文字翻译成它自己 target 字段里注明的目标语言。" + term_block +
+                    "\n\n待译内容：\n" + json.dumps(payload, ensure_ascii=False))
+        return [{"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": user}]
 
     @staticmethod
@@ -1055,8 +1480,8 @@ class Translator:
         return out if ok else None
 
     def _llm_one_chunk(self, batch, retry_json_mode=True):
-        """翻一小批，返回列表（失败项为 None）"""
-        messages = self._build_messages(batch, None)
+        """翻一小批，返回列表（失败项为 None）。batch 项为 (原文, 源语言, 目标语言)"""
+        messages = self._build_messages(batch)
         # 输出预留按条数估算：一条长句的中文最多一两百字，给足空间才不会被截断
         max_tokens = min(8192, 256 + 160 * len(batch))
         try:
@@ -1070,27 +1495,28 @@ class Translator:
         if parsed is None and retry_json_mode:
             # 有些服务商不支持 response_format，或模型没按格式回；
             # 再发一次，明确要求纯 JSON 数组
-            messages2 = messages + [{"role": "user", "content": "只输出 JSON 数组，不要任何其他文字。"}]
+            messages2 = messages + [{"role": "user",
+                                     "content": i18n.T("只输出 JSON 数组，不要任何其他文字。")}]
             try:
                 content2, _ = self.llm.chat(messages2, max_tokens=max_tokens)
                 parsed = self._parse_llm_json(content2, len(batch))
             except Exception as e:
                 self.last_llm_error = str(e)
         if parsed is None:
-            self.last_llm_error = self.last_llm_error or "模型返回的内容无法解析为译文表"
+            self.last_llm_error = self.last_llm_error or i18n.T("模型返回的内容无法解析为译文表")
             return [None] * len(batch)
 
         # 后处理：术语纠错 + 数字保真校验
         out = []
-        for (src, lang), got in zip(batch, parsed):
+        for (src, _s, dst), got in zip(batch, parsed):
             if not got:
                 out.append(None)
                 continue
             got = self._apply_fixes(got)
-            if not self._valid_translation(src, got, lang):
+            if not self._valid_translation(src, got, dst):
                 # 记下被拒的原因。只看得到「0 条成功」是没法修的，
                 # 得说清楚是被哪一条规则拦下的。
-                why = self._reject_reason(src, got, lang)
+                why = self._reject_reason(src, got, dst)
                 self.last_llm_reject = why
                 self._reject_stats[why] = self._reject_stats.get(why, 0) + 1
                 out.append(None)
@@ -1098,31 +1524,34 @@ class Translator:
                 out.append(got)
         return out
 
-    def _reject_reason(self, src, out, lang):
+    def _reject_reason(self, src, out, dst):
         """
         一条译文为什么被判不合格。顺序和 _valid_translation 的检查顺序保持一致，
         这样报出来的原因就是第一个拦下它的那条规则，不会张冠李戴。
         """
         if not out or not out.strip():
-            return "模型返回空"
+            return i18n.T("模型返回空")
         if out.strip().upper() == (src or "").strip().upper():
-            return "原样返回未翻译"
+            return i18n.T("原样返回未翻译")
         if self._is_garbage(out):
-            return "乱码"
-        if not self._is_clean(out, lang):
-            return "中英混杂"
-        if lang == "en" and self._has_leftover_english(out, src):
-            return "残留英文"
-        if not self._numbers_preserved(src, out, lang):
-            return "数字对不上"
-        return "其他"
+            return i18n.T("乱码")
+        if not self._is_clean(out, src, dst):
+            return i18n.T("中英混杂")
+        if dst == "zh" and self._has_leftover_english(out, src):
+            return i18n.T("残留英文")
+        if not self._numbers_preserved(src, out, dst):
+            return i18n.T("数字对不上")
+        return i18n.T("其他")
 
     def reject_summary(self):
         """把拒稿原因拼成一句人话：残留英文 9 条 · 数字对不上 1 条"""
         if not self._reject_stats:
             return self.last_llm_reject or ""
         items = sorted(self._reject_stats.items(), key=lambda kv: -kv[1])
-        return " · ".join(f"{k} {v} 条" for k, v in items[:3])
+        sep = " · "
+        if i18n.is_en():
+            return sep.join(f"{k} ×{v}" for k, v in items[:3])
+        return sep.join(f"{k} {v} 条" for k, v in items[:3])
 
     def _llm_chunk_robust(self, batch):
         """
@@ -1199,11 +1628,11 @@ class Translator:
         return results
 
     # ---------------- 译文校验 ----------------
-    def _valid_translation(self, src, out, lang):
+    def _valid_translation(self, src, out, dst):
         """
         一条译文能不能用，四个条件全过才行：
           1. 非空、内容和原文不同
-          2. 语言方向对（中译英不能留汉字，英译中必须出现汉字）
+          2. 语言方向对（目标是中文就得有汉字，目标是别的语言就不许留汉字）
           3. 没有中英混杂残留
           4. 数字保真（原文的数字必须都在译文里）
         """
@@ -1213,11 +1642,11 @@ class Translator:
             return False
         if self._is_garbage(out):
             return False
-        if not self._is_clean(out, lang):
+        if not self._is_clean(out, src, dst):
             return False
-        if lang == "en" and self._has_leftover_english(out, src):
+        if dst == "zh" and self._has_leftover_english(out, src):
             return False
-        if not self._numbers_preserved(src, out, lang):
+        if not self._numbers_preserved(src, out, dst):
             return False
         return True
 
@@ -1245,24 +1674,26 @@ class Translator:
                 return True
         return False
 
-    def _numbers_preserved(self, src, out, lang="en"):
+    def _numbers_preserved(self, src, out, dst="zh"):
         """
         原文里的数字必须一个不少地出现在译文里。
         图纸上数字就是规格，丢了 4-1/8" 里的 1/8 就是另一根管子。
 
-        英制换公制是唯一的例外：4-1/8" 变成 104.78mm 后数字必然全变了，
-        直接拿原文比一定判不合格，模型再努力换也会被丢掉、图纸退回英文。
-        所以先把原文按同一套规则换算成公制再比 —— 既放过正常换算，
+        单位换算是唯一的例外：4-1/8" 变成 104.78mm 后数字必然全变了，
+        直接拿原文比一定判不合格，模型再努力换也会被丢掉、图纸退回原文。
+        所以先把原文按**当前的输出单位**换算一遍再比 —— 既放过正常换算，
         又能抓住「算错数」（模型写成 100mm 的话，比 104.78 就对不上）。
 
-        例外里的例外：中译英（lang=zh）不能这么比。「8 ft 围栏」译成
-        "8 ft fence" 是正常的英文图纸写法，数字 8 本来就该原样留着；
-        若先换算成 1828.80mm 再比，8 和 1828 对不上，整条被判失败、
-        中文原文保留下来 —— 实测中文图纸里所有带 ft/lb 的标注全中招。
-        公制统一由出口那道 convert_to_metric 负责，这里只管数字别丢。
+        为什么不再判断方向：改造前只在英译中时这么做，中译英时因为
+        「8 ft 译成 8 ft fence 是正常写法」而跳过。现在单位规则由用户选，
+        中译英也可能要求换成英制（或反过来），按方向判断会漏掉一半情况。
+        两头都按 mode 换算，比的是「同一条标准」。
         """
-        if lang == "en" and src and has_imperial(src):
-            src = convert_to_metric(src)
+        if src:
+            if self.unit_mode == UNIT_METRIC and has_imperial(src):
+                src = convert_to_metric(src)
+            elif self.unit_mode == UNIT_IMPERIAL and has_metric(src):
+                src = convert_to_imperial(src)
         nums = NUM_RE.findall(src or "")
         if not nums:
             return True
@@ -1278,23 +1709,35 @@ class Translator:
             return False
         return True
 
-    def _is_clean(self, out, lang):
+    def _is_clean(self, out, src, dst):
         """
         判断译文是否「翻干净了」。
         踩过的坑：逐词替换时一部分命中一部分没命中，会拼出
         "本DRAWING所有未标注DIMENSION" 或 "match the围栏or in green" 这种垃圾，
         命中率看着不低，但绝对不能交付。
+
+        判定按**目标语言**走，不再按「源语言是中文就要求没有汉字」：
+        目标是日语时正文本来就用汉字，按汉字判会把整份图纸全判成不合格。
         """
         if not out:
             return False
         has_cn = bool(CJK_RE.search(out))
-        if lang == "zh":
-            return not has_cn                      # 译成英文后不该还留着汉字
-        if not has_cn:
-            return not re.search(r"[A-Za-z]", out)  # 原文没有字母时允许纯符号
-        en_words = len(re.findall(r"[A-Za-z]{2,}", out))
-        cn_chars = len(CJK_RE.findall(out))
-        return en_words <= cn_chars
+
+        if dst == "zh":
+            if not has_cn:
+                # 译文一个汉字都没有：原文本身没有字母（纯符号、纯数字）时允许，
+                # 否则就是没翻
+                return not re.search(r"[A-Za-z]", out)
+            en_words = len(re.findall(r"[A-Za-z]{2,}", out))
+            cn_chars = len(CJK_RE.findall(out))
+            return en_words <= cn_chars
+
+        if dst == "ja":
+            # 日文含汉字，不能按汉字判残留；只拦串进来的韩文谚文
+            return not HANGUL_RE.search(out)
+
+        # 目标是英文或其他拉丁/谚文字母语言：译文里还剩汉字就是没翻干净
+        return not has_cn
 
     def _has_leftover_english(self, out, src=""):
         """
@@ -1357,7 +1800,7 @@ class Translator:
         # 「由 Jose Galvez 设计」这种没有单词残留的情况 kept=0，直接放行。
         return kept > 0 and cn_chars < 5 * kept
 
-    def _dict_worthy(self, text, lang):
+    def _dict_worthy(self, text, src, dst):
         """
         判断这段文字值不值得交给词典。
         词典是给「短标注」用的（法兰、材质、锁紧环），
@@ -1366,62 +1809,84 @@ class Translator:
         含英制单位的标注也直接跳过词典：词典是逐词替换，
         它认得 upright 却不认得 4-1/8"，交过去会得到「4-1/8" 立杆」
         这种只翻了一半的东西。这类要整句交给 AI，让它连数值一起换算。
+
+        非中英方向直接不交：词典只有中↔英两张表，
+        拿它去拼西班牙语只会拼出一堆英文单词。
         """
-        if has_imperial(text):
+        if (src, dst) not in (("zh", "en"), ("en", "zh")):
             return False
-        if lang == "en":
+        if self.unit_mode == UNIT_METRIC and has_imperial(text):
+            return False
+        if self.unit_mode == UNIT_IMPERIAL and has_metric(text):
+            return False
+        if dst == "en":
             return len(re.findall(r"[A-Za-z]+", text)) <= 6
         return len(text) <= 20
 
-    def _dict_ok(self, src, out, lang, miss_ratio):
+    def _dict_ok(self, src, out, dst, miss_ratio):
         """词典结果够不够格直接用"""
         if not out:
             return False
-        if not self._is_clean(out, lang):
+        if not self._is_clean(out, src, dst):
             return False
-        if lang == "en" and self._has_leftover_english(out, src):
+        if dst == "zh" and self._has_leftover_english(out, src):
             return False
         if miss_ratio > (1 - DICT_ACCEPT_RATIO):
             return False
-        return self._numbers_preserved(src, out, lang)
+        return self._numbers_preserved(src, out, dst)
 
     # ---------------- 批量并发翻译（主入口） ----------------
     def translate_many(self, items, max_workers=12, progress=None):
         """
         批量翻译，返回与 items 等长的译文列表。items: [(text, lang), ...]
 
-        在真正的翻译流程外面包一层英制换算：AI 通道靠提示词自己换算，
+        lang 是「这条文字本身是什么语言」（pdf_engine 用 detect_lang 认的），
+        真正译成什么语言由界面上的源/目标下拉决定，见 _resolve。
+
+        在真正的翻译流程外面包一层单位换算：AI 通道靠提示词自己换算，
         词典通道和免费在线通道不会（它们是逐词替换），所以在统一出口兜一道，
-        保证交到图纸上的尺寸都是公制。换算只认写明了英制单位的写法，
-        译文里本来就含 mm 的不会再动第二次。
+        保证交到图纸上的数值都是用户选定的单位。换算只认写明了单位的写法，
+        译文里本来就是目标单位的不会再动第二次。
 
-        末尾再过一次小数位规范化：不管数值是 AI 写的还是正则算的，
-        只要带 mm / kg 后缀就统一成规定位数，避免同一份图纸两种精度写法。
+        末尾再过一次小数位规范化（仅公制；英寸是分数写法，没有小数位可抹）。
 
-        最后一道是校验：拿原文独立复算一遍，与译文里的公制值配对比对。
+        最后一道是校验：拿原文独立复算一遍，与译文里的数值配对比对。
         算错数的直接改成复算值，改不了的记进 metric_report 交给人看。
         """
         results = self._translate_inner(items, max_workers, progress)
         converted = 0
-        for i, (raw, lang) in enumerate(items):
+        for i, (raw, hint) in enumerate(items):
             out = results[i]
             if not out:
                 continue
             new = out
-            if has_imperial(new):
-                new2 = convert_to_metric(new)
-                if new2 != new:
-                    converted += 1
-                    new = new2
-            new = normalize_metric_format(new)
+            # 注意：这里**不能**因为「这条不用翻译」就跳过换算。
+            # 「英文图纸输出英文、只把英寸换成毫米」是完全合理的用法
+            # （客户要一份公制版的英文图）。翻译是翻译，换单位是换单位，
+            # 两件事绑在一起，用户就做不到只换单位不换语言。
+            if self.unit_mode == UNIT_IMPERIAL:
+                if has_metric(new):
+                    new2 = convert_to_imperial(new)
+                    if new2 != new:
+                        converted += 1
+                        new = new2
+            elif self.unit_mode == UNIT_METRIC:
+                if has_imperial(new):
+                    new2 = convert_to_metric(new)
+                    if new2 != new:
+                        converted += 1
+                        new = new2
+                new = normalize_metric_format(new)
             # 换算完再独立复算一遍。这一步是给「模型自己算的数」上的保险：
-            # 前面的 convert 只处理文本里还留着英制单位的，
+            # 前面的 convert 只处理文本里还留着原单位的，
             # AI 已经把 4-1/8" 写成 100mm 的情况它根本看不见，
             # 只有拿原文重算一遍比对才能抓出来。
+            _src, dst = self._resolve(hint)
             new, _issues = verify_metric_output(
-                raw, new, lang=lang,
+                raw, new, dst=dst or "",
                 page=getattr(self, "page_no", None),
-                report=getattr(self, "metric_report", None))
+                report=getattr(self, "metric_report", None),
+                mode=self.unit_mode)
             if new != out:
                 results[i] = new
         # 单独记一个计数，不塞进 self.stats —— 那个字典的键是固定五个，
@@ -1444,9 +1909,25 @@ class Translator:
         self.last_llm_reject = ""
         self._reject_stats = {}
 
+    def _cache_get(self, key, src, dst, text):
+        """
+        查缓存。新键是「源>目标::原文」，老版本用的是「源::原文」
+        （那时目标语言由源语言反推）。
+
+        为什么要兼容老键：缓存里是用户已经花过钱的译文。升级一次就全部作废、
+        重新翻一遍，等于让老用户为一次界面改版付账单。
+        只要方向对得上（老键 lang=zh 就是中译英），旧译文和新的完全等价。
+        """
+        if key in self.cache:
+            return self.cache[key]
+        legacy = "zh" if dst == "en" else ("en" if dst == "zh" else None)
+        if legacy and src == legacy:
+            return self.cache.get(f"{legacy}::{text}")
+        return None
+
     def _translate_inner(self, items, max_workers=12, progress=None):
         """
-        批量翻译，返回与 items 等长的译文列表。items: [(text, lang), ...]
+        批量翻译，返回与 items 等长的译文列表。items: [(text, hint), ...]
 
         处理顺序：缓存 → 词典 → AI → 免费在线。
         2700 行图纸实测：配了 AI 接口时 180 条标注约 20 秒翻完。
@@ -1455,46 +1936,51 @@ class Translator:
         pending = []
 
         # ---- 第一轮：缓存与词典，纯本地，零成本 ----
-        for i, (raw, lang) in enumerate(items):
+        for i, (raw, hint) in enumerate(items):
             text = (raw or "").strip()
-            if not text or lang not in ("zh", "en"):
+            src, dst = self._resolve(hint)
+            if not text or not dst:
+                # 不翻的条目原样返回。注意这里不能记进 failed ——
+                # 用户选了「英→中」，中文标注本来就不该动，算失败会虚报漏译
                 results[i] = text
                 continue
-            key = f"{lang}::{text}"
-            if key in self.cache:
+            key = f"{src}>{dst}::{text}"
+            hit = self._cache_get(key, src, dst, text)
+            if hit is not None:
                 self.stats["cache"] += 1
-                results[i] = self.cache[key]
+                results[i] = hit
                 continue
             dict_out = ""
-            if self._dict_worthy(text, lang):
-                dict_out, miss_ratio = self._dict_translate(text, lang)
-                if self._dict_ok(text, dict_out, lang, miss_ratio):
+            if self._dict_worthy(text, src, dst):
+                dict_out, miss_ratio = self._dict_translate(text, src, dst)
+                if self._dict_ok(text, dict_out, dst, miss_ratio):
                     self.stats["dict"] += 1
                     self.cache[key] = dict_out
                     results[i] = dict_out
                     continue
-            pending.append((i, text, lang, dict_out))
+            pending.append((i, text, src, dst, dict_out))
 
         if not pending:
             return results
 
         if progress:
-            progress(f"{len(items) - len(pending)} 条本地解决，{len(pending)} 条需联网/AI")
+            progress(i18n.fmt("{a} 条本地解决，{b} 条需联网/AI",
+                              a=len(items) - len(pending), b=len(pending)))
 
         # ---- 第二轮：AI 接口（配了就用，质量最好，优先于免费接口） ----
         ai_alive = False        # 本轮 AI 是否至少成功译出一条（用于判断接口是否真的通）
         if self.llm.available():
             llm_before = self.stats["llm"]
-            batch = [(p[1], p[2]) for p in pending]
+            batch = [(p[1], p[2], p[3]) for p in pending]
             llm_out = self._llm_translate_batch(batch)
             rest = []
-            for (idx, text, lang, dict_out), out in zip(pending, llm_out):
+            for (idx, text, src, dst, dict_out), out in zip(pending, llm_out):
                 if out:
                     self.stats["llm"] += 1
-                    self.cache[f"{lang}::{text}"] = out
+                    self.cache[f"{src}>{dst}::{text}"] = out
                     results[idx] = out
                 else:
-                    rest.append((idx, text, lang, dict_out))
+                    rest.append((idx, text, src, dst, dict_out))
             ai_alive = self.stats["llm"] > llm_before
             self.llm.usage.note_items(len(pending) - len(rest))
             pending = rest
@@ -1507,38 +1993,39 @@ class Translator:
         # 特殊符号），再丢给免费的机器翻译不但救不回来，还会把机翻质量混进图纸——
         # 反而是倒退。这种情况直接按「保留原文」处理，图纸至少是干净可读的。
         if ai_alive:
-            for idx, text, lang, dict_out in pending:
-                self._finalize_fallback(results, idx, text, lang, dict_out)
+            for idx, text, src, dst, dict_out in pending:
+                self._finalize_fallback(results, idx, text, src, dst, dict_out)
             return results
 
         if not self.cfg.get("online_fallback", True):
-            for idx, text, lang, dict_out in pending:
-                self._finalize_fallback(results, idx, text, lang, dict_out)
+            for idx, text, src, dst, dict_out in pending:
+                self._finalize_fallback(results, idx, text, src, dst, dict_out)
             return results
 
         def work(item):
-            idx, text, lang, dict_out = item
-            return idx, text, lang, dict_out, self._online_translate(text, lang, throttle=False)
+            idx, text, src, dst, dict_out = item
+            return (idx, text, src, dst, dict_out,
+                    self._online_translate(text, src, dst, throttle=False))
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for idx, text, lang, dict_out, out in ex.map(work, pending):
-                if out and self._valid_translation(text, out, lang):
+            for idx, text, src, dst, dict_out, out in ex.map(work, pending):
+                if out and self._valid_translation(text, out, dst):
                     self.stats["online"] += 1
-                    self.cache[f"{lang}::{text}"] = out
+                    self.cache[f"{src}>{dst}::{text}"] = out
                     results[idx] = out
                 else:
-                    self._finalize_fallback(results, idx, text, lang, dict_out)
+                    self._finalize_fallback(results, idx, text, src, dst, dict_out)
         return results
 
-    def _finalize_fallback(self, results, idx, text, lang, dict_out):
+    def _finalize_fallback(self, results, idx, text, src, dst, dict_out):
         """
         所有通道都失败时的收尾。
         关键取舍：只翻了一半、中英混杂，比干脆不翻更糟：
-        前者让整张图纸不可读，后者至少还是原始英文图纸。
+        前者让整张图纸不可读，后者至少还是原始图纸。
         """
-        if dict_out and self._dict_ok(text, dict_out, lang, 0.0):
+        if dict_out and self._dict_ok(text, dict_out, dst, 0.0):
             self.stats["dict"] += 1
-            self.cache[f"{lang}::{text}"] = dict_out
+            self.cache[f"{src}>{dst}::{text}"] = dict_out
             results[idx] = dict_out
             return
         self.stats["failed"] += 1
@@ -1546,7 +2033,10 @@ class Translator:
 
     # ---------------- 单条翻译（兼容旧调用） ----------------
     def translate(self, text, lang):
-        """翻译单条文字。lang: 'zh' 表示中译英，'en' 表示英译中"""
+        """
+        翻译单条文字。lang 是这条文字自己的语言（'zh' / 'en'），
+        译成什么语言看界面上的目标语言设置。
+        """
         out = self.translate_many([(text, lang)])
         return out[0] if out else text
 

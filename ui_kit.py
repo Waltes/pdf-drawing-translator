@@ -25,6 +25,15 @@ from ctypes import wintypes
 import tkinter as tk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
+# 界面文案走 i18n，跟 app.py 用同一套词表。
+# 兜底是因为 ui_kit 本来只依赖 tkinter/PIL：哪天单独拿去做别的界面，
+# 没有 core 目录也不该因为一句翻译就整个 import 失败。
+try:
+    from core.i18n import T
+except Exception:
+    def T(s):
+        return s
+
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 
@@ -164,6 +173,63 @@ FONT_CHOICES = [
     "SimHei",
 ]
 DEFAULT_FONT = FONT_CHOICES[0]
+
+# 字体族名的英文显示名。
+#
+# 为什么需要单独一张表：Windows 上这些字体的**族名本身就是中文**
+# （「思源黑体 CN」「微软雅黑」「宋体」），英文界面把族名原样显示出来，
+# 用户看到的是一串汉字，既读不懂也以为是编码坏了。
+#
+# 只改「显示名」，真正传给 Tk 的仍然是族名 —— 拿显示名去建字体，
+# Windows 找不到这个族会静默退成默认字体，整个界面突然变样，比露中文更糟。
+FONT_ALIAS_EN = {
+    "思源黑体 CN": "Source Han Sans CN",
+    "思源黑体": "Source Han Sans",
+    "思源宋体 CN": "Source Han Serif CN",
+    "思源宋体": "Source Han Serif",
+    "微软雅黑": "Microsoft YaHei",
+    "微软雅黑 Light": "Microsoft YaHei Light",
+    "微软雅黑 UI": "Microsoft YaHei UI",
+    "微軟正黑體": "Microsoft JhengHei",
+    "宋体": "SimSun",
+    "新宋体": "NSimSun",
+    "黑体": "SimHei",
+    "楷体": "KaiTi",
+    "楷体_GB2312": "KaiTi_GB2312",
+    "仿宋": "FangSong",
+    "仿宋_GB2312": "FangSong_GB2312",
+    "等线": "DengXian",
+    "等线 Light": "DengXian Light",
+    "幼圆": "YouYuan",
+    "隶书": "LiSu",
+    "华文细黑": "STXihei",
+    "华文黑体": "STHeiti",
+    "华文楷体": "STKaiti",
+    "华文宋体": "STSong",
+    "华文仿宋": "STFangsong",
+    "华文中宋": "STZhongsong",
+    "苹方-简": "PingFang SC",
+    "苹方": "PingFang SC",
+    "冬青黑体简体中文": "Hiragino Sans GB",
+}
+
+
+def font_label(name):
+    """
+    字体在界面上的显示名：英文界面里把中文族名换成英文名，其余情况原样返回。
+
+    不在表里的中文字体（用户自己装的「方正粗黑」之类）没法凭空编个英文名，
+    照原样显示 —— 总比显示一个猜错的名字好。
+    """
+    if not name:
+        return name
+    try:
+        from core import i18n
+        if not i18n.is_en():
+            return name
+    except Exception:
+        return name
+    return FONT_ALIAS_EN.get(str(name).strip(), name)
 
 # 这些字体不承载正文：@ 开头是 CJK 竖排变体，选进去整窗文字会竖着排、
 # 行高全乱；Wingdings 一类是符号字体，中文进去全是方块。
@@ -1202,7 +1268,7 @@ class TitleBar(tk.Canvas):
         # 右上角设置入口。用文字不用齿轮符号：不同字体对符号的渲染差别太大
         self._set_id = None
         if self._on_settings:
-            self._set_id = self.create_text(0, y, text="设置", anchor="e",
+            self._set_id = self.create_text(0, y, text=T("设置"), anchor="e",
                                             fill=TEXT_DIM,
                                             font=t.font(t.font_size, bold=False))
 

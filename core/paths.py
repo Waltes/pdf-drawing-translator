@@ -12,7 +12,7 @@
     表现就是「装完一打开就闪退」。而且 UAC 虚拟化会把它偷偷重定向到
     VirtualStore，用户改的配置和程序读的不是同一份，排查起来极费劲。
 
-所以打包后把可写数据放到 %APPDATA%\\PDF图纸翻译\\data；源码运行照旧用 ./data，
+所以打包后把可写数据放到 %APPDATA%\\PDFDrawingTranslator\\data；源码运行照旧用 ./data，
 开发时不用改任何习惯。
 """
 
@@ -20,9 +20,20 @@ import os
 import shutil
 import sys
 
-# 用户数据目录用中文名，跟开始菜单、桌面快捷方式保持一致，
-# 用户去翻配置的时候认得出这是什么软件
-APP_TITLE = "PDF图纸翻译"
+# 用户数据目录名，用纯 ASCII。
+#
+# 1.0.0 之前叫「PDF图纸翻译」，跟开始菜单里的名字一致，看着亲切。但它有个
+# 硬伤：非中文的系统上这个目录名会显示成一串方块（资源管理器、备份工具、
+# 命令行 ls 都一样），用户照着文档去翻 config.json 时根本对不上号；
+# 而 README 里抄路径的人，只要输入法差一点就打不开。
+# 名字统一成 ASCII 之后，文档里那句 %APPDATA%\PDFDrawingTranslator\data
+# 谁都能一字不差地敲出来。
+DATA_DIR_NAME = "PDFDrawingTranslator"
+
+# 老版本用过的目录名。升级时要把里面的东西搬过来 ——
+# 不搬的话用户装完新版，API key、术语库、两万条翻译缓存全都「没了」，
+# 在他看来就是这版更新把他的配置删了。
+LEGACY_DIR_NAMES = ("PDF图纸翻译",)
 
 FROZEN = bool(getattr(sys, "frozen", False))
 
@@ -60,17 +71,63 @@ def _writable(path):
         return False
 
 
+def _migrate_legacy_dirs(base):
+    """
+    把 %APPDATA% 下老的中文数据目录搬到新目录。返回搬过来的文件数（只用于日志）。
+
+    两种情形分开处理：
+      · 新目录不存在 → 整个目录一次 move 过去。最干净，用户完全感觉不到换过名字，
+        配置、缓存、术语库、用量记录一样不少。
+      · 新目录已存在（用户先用过新版，又装回旧版跑了一次）→ 只把新目录里没有的
+        文件补进去，绝不覆盖，也绝不删老目录。宁可硬盘里多留一份，也不能动
+        用户已经在用的数据。
+    """
+    moved = 0
+    new_dir = os.path.join(base, DATA_DIR_NAME)
+    for name in LEGACY_DIR_NAMES:
+        old = os.path.join(base, name)
+        if not os.path.isdir(old):
+            continue
+        if not os.path.exists(new_dir):
+            try:
+                os.makedirs(base, exist_ok=True)
+                shutil.move(old, new_dir)
+                moved += 1
+                continue
+            except Exception:
+                # 跨卷、文件被占用、权限不足都走逐文件补，不在这里抛异常：
+                # 搬不动也得能把程序打开，配置丢了只是体验问题，起不来是故障
+                pass
+        for root, _dirs, files in os.walk(old):
+            rel = os.path.relpath(root, old)
+            dst_root = new_dir if rel == "." else os.path.join(new_dir, rel)
+            try:
+                os.makedirs(dst_root, exist_ok=True)
+            except Exception:
+                continue
+            for fn in files:
+                dst = os.path.join(dst_root, fn)
+                if os.path.exists(dst):
+                    continue
+                try:
+                    shutil.copy2(os.path.join(root, fn), dst)
+                    moved += 1
+                except Exception:
+                    pass
+    return moved
+
+
 def _data_dir():
     """
     可写数据目录。
 
     源码运行：项目根 / data（和以前完全一样，不打扰开发习惯）
-    打包运行：%APPDATA% / PDF图纸翻译 / data
+    打包运行：%APPDATA% / PDFDrawingTranslator / data
               —— APPDATA 写不进去这种极端情况（某些域环境、漫游配置被锁），
                  退回程序目录，至少还能跑起来，不至于一装就废。
 
     注意探针要打在**最终那个目录**上，不能只探父目录：
-    只建了 PDF图纸翻译 却没建 data，后面写配置时才会炸，
+    只建了 PDFDrawingTranslator 却没建 data，后面写配置时才会炸，
     而且错误发生在离现场很远的地方，很难查。
     """
     if not FROZEN:
@@ -79,7 +136,13 @@ def _data_dir():
         return d
 
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, APP_TITLE, "data")
+    # 先搬迁再探可写：_writable 会顺手建目录，建完新目录就变成
+    # 「新目录已存在」的情形，move 分支永远走不到
+    try:
+        _migrate_legacy_dirs(base)
+    except Exception:
+        pass
+    d = os.path.join(base, DATA_DIR_NAME, "data")
     if _writable(d):            # 内部已 makedirs + 真写过一次
         return d
 

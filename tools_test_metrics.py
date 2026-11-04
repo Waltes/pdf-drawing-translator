@@ -17,8 +17,8 @@ import os
 import sys
 
 sys.path.insert(0, os.getcwd())
-from core.translate import (MetricReport, convert_to_metric, has_imperial,
-                            verify_metric_output)
+from core.translate import (MetricReport, convert_to_imperial, convert_to_metric,
+                            has_imperial, verify_metric_output)
 
 # ---------------------------------------------------------------------------
 # 第一组：单位写法的直测
@@ -136,6 +136,148 @@ def test_units():
     return bad
 
 
+# ---------------------------------------------------------------------------
+# 第二组：公制 → 英制（反方向）
+#
+# 这一组跟第一组是镜像的，但有几处不能照搬：
+#   1. 英寸用分数写（1-1/2"），不是小数 —— 车间看的是卷尺刻度。
+#   2. 分数凑不出来时退回小数（2000mm → 78.74"），不许硬凑 78-47/64"。
+#   3. 细小公差绝不能被舍成 0"：0.05mm 约 1/500 英寸，
+#      老算法 round(0.002×64)=0 会写出 0"，等于把公差抹成零公差。
+# ---------------------------------------------------------------------------
+IMPERIAL_CASES = [
+    # 整英寸
+    ('25.40mm', '1"'),
+    ('50.80mm', '2"'),
+    ('609.60mm', '24"'),
+    ('2743.20mm', '108"'),
+
+    # 常见分数
+    ('12.70mm', '1/2"'),
+    ('6.35mm', '1/4"'),
+    ('3.18mm', '1/8"'),
+    ('38.10mm', '1-1/2"'),
+    ('8.73mm', '11/32"'),
+    ('101.60mm', '4"'),
+    ('152.40mm', '6"'),
+
+    # 凑不出整齐分数的大尺寸：退回两位小数
+    ('2000mm', '78.74"'),
+    ('1000mm', '39.37"'),
+
+    # 细小公差：必须保住有效位，不能变 0"
+    ('0.05mm', '0.002"'),
+    ('0.1mm', '0.004"'),
+    ('0.254mm', '0.01"'),
+    ('0.5mm', '0.02"'),
+    ('1mm', '0.039"'),
+    ('0mm', '0"'),
+
+    # 中文单位词与工程前缀
+    ('2000毫米', '78.74"'),
+    ('R88.90mm', 'R3-1/2"'),
+    ('OD38.10mm', 'OD1-1/2"'),
+    ('Ø38.10mm', 'Ø1-1/2"'),
+
+    # 质量：磅固定两位小数
+    ('11.34kg', '25.00 lb'),
+    ('1kg', '2.20 lb'),
+    ('0.227kg', '0.50 lb'),
+    ('25 千克', '55.12 lb'),
+
+    # 数值范围：两端都要换，不能只换后一个
+    ('609.60–914.40mm', '24"–36"'),
+    ('10~12 kg', '22.05~26.46 lb'),
+
+    # 以下是「不该动」的
+    ('12"', '12"'),                    # 本来就是英寸
+    ('R3-1/2"', 'R3-1/2"'),
+    ('M8 x 30', 'M8 x 30'),            # 螺纹规格，不是尺寸
+    ('DN50', 'DN50'),
+    ('1/4"-20 UNC', '1/4"-20 UNC'),
+    ('25 lb', '25 lb'),                # 本来就是磅
+    ('ISO 2768', 'ISO 2768'),
+]
+
+
+def test_imperial():
+    """跑公制 → 英制的写法直测，返回失败条数"""
+    bad = 0
+    for src, want in IMPERIAL_CASES:
+        got = convert_to_imperial(src)
+        if got != want:
+            bad += 1
+            print(f"[FAIL] 英制写法 {src!r}")
+            print(f"        得到 {got!r}  期望 {want!r}")
+    print(f"\n英制写法：通过 {len(IMPERIAL_CASES) - bad} / 失败 {bad}")
+    return bad
+
+
+# ---------------------------------------------------------------------------
+# 第三组：反方向的校验层
+#
+# 校验层的规矩和方向无关：拿原文独立复算一遍，与译文里的数值配对。
+# 但期望值的写法变成英寸分数、磅保留两位小数，容差也跟着换
+# （英寸 0.002"、磅 0.005）。这一组钉住的是「换了方向别算错」。
+# 每条：(说明, 原文, 已换算译文, 期望动作)
+# ---------------------------------------------------------------------------
+IMPERIAL_VERIFY_CASES = [
+    ("换对了，不该动",
+     '长度 2000mm', 'LENGTH 78.74"', "pass"),
+
+    ("换对了（分数写法）",
+     '外径 38.10mm', 'OD 1-1/2"', "pass"),
+
+    ("AI 算错数，应改成复算值",
+     '长度 2000mm', 'LENGTH 80"', "fix:78.74"),
+
+    ("AI 自己换成小数，数值对，不动",
+     '外径 38.10mm', 'OD 1.5"', "pass"),
+
+    ("漏换算：译文把毫米原样抄过来",
+     '长度 2000mm', 'LENGTH 2000mm', "fix:78.74"),
+
+    ("质量 25 lb 保留两位小数",
+     '重 11.34kg', 'weight 25.00 lb', "pass"),
+
+    ("质量算错",
+     '重 11.34kg', 'weight 20.00 lb', "fix:25.00"),
+
+    ("原文本来就是英制，原样保留",
+     '4"', '4"', "pass"),
+
+    ("螺纹代号不动，也不该报警",
+     '1/4"-20 螺钉', '1/4"-20 screw', "pass"),
+]
+
+
+def test_imperial_verify():
+    """跑反方向的校验层用例，返回失败条数"""
+    bad = 0
+    for note, src, out, expect in IMPERIAL_VERIFY_CASES:
+        rep = MetricReport()
+        fixed, issues = verify_metric_output(src, out, dst="en", page=1,
+                                             report=rep, mode="imperial")
+        lv = [i[0] for i in issues]
+        if expect == "pass":
+            good = (fixed == out and not issues)
+        elif expect.startswith("fix:"):
+            want = expect.split(":", 1)[1]
+            good = (want in fixed) and ("fix" in lv)
+        else:
+            good = ("warn" in lv) and (fixed == out)
+        if not good:
+            bad += 1
+            print(f"[FAIL] 英制校验 {note}")
+            print(f"        原文 {src!r}")
+            print(f"        输入 {out!r}")
+            print(f"        输出 {fixed!r}  级别 {lv}")
+            if issues:
+                print(f"        明细 {issues[0][4]}")
+    print(f"英制校验：通过 {len(IMPERIAL_VERIFY_CASES) - bad} / 失败 {bad}")
+    return bad
+
+
 CASES = [
     # (说明, 原文, 已换算译文, 期望的动作)
     ("完全一致，不该动",
@@ -217,11 +359,13 @@ CASES = [
 
 def main():
     unit_fail = test_units()
+    imperial_fail = test_imperial()
+    imperial_verify_fail = test_imperial_verify()
 
     ok = fail = 0
     for note, src, out, expect in CASES:
         rep = MetricReport()
-        fixed, issues = verify_metric_output(src, out, lang="en", page=1, report=rep)
+        fixed, issues = verify_metric_output(src, out, dst="zh", page=1, report=rep)
         got_lv = [i[0] for i in issues]
 
         if expect == "pass":
@@ -245,7 +389,7 @@ def main():
             print(f"        明细 {issues[0][4]}")
 
     print(f"\n校验层：通过 {ok} / 失败 {fail}")
-    total_fail = fail + unit_fail
+    total_fail = fail + unit_fail + imperial_fail + imperial_verify_fail
     print(f"合计失败 {total_fail} 条")
     return 0 if total_fail == 0 else 1
 
