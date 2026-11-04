@@ -480,7 +480,9 @@ class SettingsDialog:
         self.ent_batch = row("每批条数", lambda p: entry(
             p, value=str(self.llm_cfg.get("batch_size", 30))), hint="1–40，越大越省请求")
 
-        tk.Label(b, text="密钥只保存在本机 data/config.json，不会上传到任何地方。",
+        # 路径不在这里写死：打包安装后配置在 %APPDATA%，不是程序目录。
+        # 完整路径显示在下面「配置文件：…」那一行，这里只说清楚不上传。
+        tk.Label(b, text="密钥只保存在本机配置文件里，不会上传到任何地方。",
                  bg=CARD_BG, fg=TEXT_FAINT, font=t.font(t.font_size - 1),
                  anchor="w", justify="left").pack(fill="x", pady=(0, t.px(8)))
 
