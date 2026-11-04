@@ -7,6 +7,7 @@
 *.cmd text eol=crlf
 *.spec text eol=lf
 *.txt text eol=lf
+*.isl text eol=lf
 
 # 二进制文件不要让 git 做任何转换（转了就损坏）
 *.pdf binary

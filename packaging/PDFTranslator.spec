@@ -22,7 +22,7 @@ PyInstaller 打包配置（Windows）。
 
 3) 不打包 data/config.json。
    那是用户自己的 API key，打进安装包等于把密钥发给所有人。
-   程序第一次运行会在 %APPDATA%\\PDF图纸翻译\\data 建自己的配置。
+   程序第一次运行会在 %APPDATA%\\PDFDrawingTranslator\\data 建自己的配置。
 """
 
 import os
@@ -45,7 +45,9 @@ a = Analysis(
     binaries=[],
     datas=datas,
     # tkinterdnd2 靠数据文件里的 tkdnd 才认得出拖拽，必须显式声明
-    hiddenimports=["tkinterdnd2"],
+    # core.i18n_en 是在 T() 里按需导入的（英文界面才加载），静态分析不一定能
+    # 顺着这条路径找到它 —— 漏掉的话中文界面一切正常、切成英文就崩，最难查
+    hiddenimports=["tkinterdnd2", "core.i18n_en"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

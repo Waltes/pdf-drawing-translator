@@ -17,8 +17,11 @@ cd /d "%~dp0"
 rem The launcher and app.py must live in the same folder.
 if not exist "%~dp0app.py" goto wrongplace
 
-rem Prefer the full Python 3.14 install, which ships with tkinter.
-rem The bundled runtime used by WorkBuddy has no tkinter.
+rem Prefer a full python.org install, because it ships with tkinter. The path
+rem below is the developer's own install; on any other machine it is simply
+rem not there, and we fall through to whatever is on PATH. That is safe even
+rem when PATH points at a runtime without tkinter: app.py then relaunches
+rem itself with an interpreter that has it.
 set "PY=C:\Users\stanl\AppData\Local\Programs\Python\Python314\python.exe"
 set "PYW=C:\Users\stanl\AppData\Local\Programs\Python\Python314\pythonw.exe"
 

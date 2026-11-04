@@ -1,5 +1,5 @@
 ﻿; ============================================================================
-;  Inno Setup 安装包脚本
+;  Inno Setup 安装包脚本（中英双语）
 ;
 ;  编译（需要先装 Inno Setup 6）：
 ;      python -m PyInstaller packaging\PDFTranslator.spec --noconfirm
@@ -19,27 +19,35 @@
 ;
 ;  3) 卸载时问一句要不要删配置
 ;     卸载完直接删掉用户的术语库和缓存，是很多人骂软件的原因。
+;
+;  4) 双语向导，默认跟随系统语言
+;     中文语言文件是本目录下的 ChineseSimplified.isl —— Inno 官方不带简体中文，
+;     里面只写了向导上真正会看到的那几句，没写的自动落回英文 Default.isl。
+;     不引第三方整份翻译，是因为那种文件几百条，官方升级一次就可能对不上，
+;     到时候界面上蹦出半句没翻的话反而更难看。
 ; ============================================================================
 
 #define AppName "PDF 图纸翻译"
+#define AppNameEn "PDF Drawing Translator"
 #define AppVer "1.0.0"
 #define AppExe "PDF图纸翻译.exe"
 #define AppPublisher "Walter"
 
 [Setup]
 AppId={{E07108F2-9CFA-4C91-A748-948BDE9016E8}
-AppName={#AppName}
+; AppName 只能有一个，这里是双语的：英文用户看得出这是什么，中文用户认得出来。
+; 安装目录名用纯 ASCII 的 DrawingTranslator，避免中文路径给解压/杀软添麻烦。
+AppName={#AppName} (PDF Drawing Translator)
 AppVersion={#AppVer}
 AppVerName={#AppName} {#AppVer}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\PDF图纸翻译
+DefaultDirName={autopf}\PDFDrawingTranslator
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=output
 OutputBaseFilename=PDFTranslator_Setup_{#AppVer}
 SetupIconFile=..\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
-UninstallDisplayName={#AppName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -48,58 +56,60 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
+; 让安装包启动时用系统语言挑向导语言（中文系统进中文向导，其余进英文）
+LanguageDetectionMethod=uilanguage
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "zh"; MessagesFile: "ChineseSimplified.isl"
 
-; 只把向导里真正会看到的文案换成中文。
-; 不做完整的 isl 翻译：官方包不带简体中文，自己补一份几百条的文件，
-; 漏一条就会在界面上蹦出半句英文，反而更难看。
-[Messages]
-WelcomeLabel1=欢迎安装 [name]
-WelcomeLabel2=即将把 [name] 装到你的电脑上。%n%n它可以把工程图纸 PDF 在中文和英文之间对译，图形和版式不动，英制尺寸自动换算成公制。%n%n关闭其它正在运行的程序，然后点「下一步」继续。
-WizardSelectDir=选择安装位置
-SelectDirDesc=装到哪里？
-SelectDirLabel3=安装程序会把 [name] 装到下面的文件夹里。
-SelectDirBrowseLabel=如果想换一个位置，点「浏览」。装完点「下一步」。
-WizardReady=准备安装
-ReadyLabel1=现在可以开始安装了。
-ReadyLabel2a=点「安装」开始，或者点「上一步」回去改设置。
-ReadyLabel2b=点「安装」开始。
-WizardInstalling=正在安装
-FinishedHeadingLabel=安装完成
-FinishedLabelNoIcons=装好了。双击桌面上的「PDF 图纸翻译」就能用。%n%n第一次打开建议先拖一份 PDF 进去试，或者用安装目录下「示例图纸」里的那份。
-FinishedLabel=装好了。双击桌面上的「PDF 图纸翻译」就能用。%n%n第一次打开建议先拖一份 PDF 进去试，或者用安装目录下「示例图纸」里的那份。
-ClickNext=点「下一步」继续。
-ButtonNext=下一步(&N) >
-ButtonBack=< 上一步(&B)
-ButtonInstall=安装(&I)
-ButtonFinish=完成(&F)
-ButtonCancel=取消
-ButtonBrowse=浏览(&R)...
-ButtonYes=是(&Y)
-ButtonNo=否(&N)
-ExitSetupTitle=退出安装
-ExitSetupMessage=安装还没完成。现在退出，程序不会装上。%n%n确定要退出吗？
-ConfirmUninstall=确定要卸载 %1 吗？
+; 任务、运行、卸载提示这些散在别处的文案，用 CustomMessages 按语言给两份。
+; 直接写死中文的话，英文用户会在「附加任务」里看到一行中文。
+[CustomMessages]
+en.CreateDesktopIcon=Create a desktop shortcut
+zh.CreateDesktopIcon=创建桌面快捷方式
+en.AdditionalTasks=Additional tasks:
+zh.AdditionalTasks=附加任务：
+en.RunAfterInstall=Launch {#AppNameEn}
+zh.RunAfterInstall=立即运行 {#AppName}
+en.SamplesFolder=Sample drawings
+zh.SamplesFolder=示例图纸
+en.ShortcutGuide=User guide
+zh.ShortcutGuide=使用说明
+en.KeepDataPrompt=Also delete your settings and translation cache?%n%nKeeping them means a reinstall picks up where you left off (your API key and glossary live there).%n%nChoose Yes to delete:
+zh.KeepDataPrompt=是否一并删除配置和翻译缓存？%n%n留着的话，以后重装还能接着用（里面有你自己填的 API key 和术语库）。%n%n选「是」会删掉这些：
+en.KeepDataTitle=Uninstall
+zh.KeepDataTitle=卸载
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalTasks}"
 
 [Files]
 Source: "..\dist\PDF图纸翻译\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 两版说明都放进安装目录：程序本身是中英双语，用户可能想换一版看
 Source: "..\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\USER-GUIDE.md"; DestDir: "{app}"; DestName: "User Guide (EN).md"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\samples\*.pdf"; DestDir: "{app}\示例图纸"; Flags: ignoreversion
+Source: "..\samples\*.pdf"; DestDir: "{app}\{cm:SamplesFolder}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{group}\使用说明"; Filename: "{app}\使用说明.md"
-Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+; 快捷方式名按安装语言给：英文用户桌面上出现「PDF Drawing Translator」，
+; 中文用户看到「PDF 图纸翻译」。指向的都是同一个 exe。
+; exe 文件名保持中文不变 —— 改它会让老版本的快捷方式指向一个不存在的文件，
+; 而且安装目录里会新旧两个 exe 并存。用户在快捷方式和任务栏里看到的已是本地化名字，
+; 中文文件名只在「打开文件所在位置」时才会遇到，不值得为它冒升级风险。
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"; Languages: zh
+Name: "{group}\{#AppNameEn}"; Filename: "{app}\{#AppExe}"; Languages: en
+; 开始菜单里的说明，按当前安装语言指向对应那一版
+Name: "{group}\使用说明"; Filename: "{app}\使用说明.md"; Languages: zh
+Name: "{group}\User guide"; Filename: "{app}\User Guide (EN).md"; Languages: en
+Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"; Languages: zh
+Name: "{group}\Uninstall {#AppNameEn}"; Filename: "{uninstallexe}"; Languages: en
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon; Languages: zh
+Name: "{autodesktop}\{#AppNameEn}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon; Languages: en
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "立即运行 {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "{cm:RunAfterInstall}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -107,20 +117,45 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 // 卸载收尾时问一句：配置和翻译缓存要不要一起删。
 // 直接删掉用户的术语库，是最容易挨骂的做法；直接留着，硬盘里又会悄悄堆几百兆。
+//
+// 要问两个目录：一个是现在的 %APPDATA%\PDFDrawingTranslator，
+// 一个是老版本的 %APPDATA%\PDF图纸翻译。程序启动时会把老的搬进新的，
+// 但搬不动（文件被占用、权限不足）时老目录还留在原地，卸载不能把它落下，
+// 否则用户选「是」删干净了，硬盘里还藏着一份带 API key 的旧配置。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  DataDir: String;
+  DataDir, LegacyDir, Targets: String;
+  Found: Boolean;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    DataDir := ExpandConstant('{userappdata}\PDF图纸翻译');
+    DataDir := ExpandConstant('{userappdata}\PDFDrawingTranslator');
+    LegacyDir := ExpandConstant('{userappdata}\PDF图纸翻译');
+    Targets := '';
+    Found := False;
     if DirExists(DataDir) then
     begin
-      if MsgBox('是否一并删除配置和翻译缓存？' + #13#10 + #13#10 +
-                '留着的话，以后重装还能接着用（里面有你自己填的 API key 和术语库）。' + #13#10 +
-                '选「是」会把这个文件夹整个删掉：' + #13#10 + DataDir,
+      Targets := DataDir;
+      Found := True;
+    end;
+    if DirExists(LegacyDir) then
+    begin
+      if Found then
+        Targets := Targets + #13#10 + LegacyDir
+      else
+        Targets := LegacyDir;
+      Found := True;
+    end;
+    if Found then
+    begin
+      if MsgBox(ExpandConstant('{cm:KeepDataPrompt}') + #13#10 + Targets,
                 mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
-        DelTree(DataDir, True, True, True);
+      begin
+        if DirExists(DataDir) then
+          DelTree(DataDir, True, True, True);
+        if DirExists(LegacyDir) then
+          DelTree(LegacyDir, True, True, True);
+      end;
     end;
   end;
 end;

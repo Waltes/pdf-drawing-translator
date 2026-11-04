@@ -1,6 +1,10 @@
 # exe 文件属性里「详细信息」那一页的内容。
 # 不配的话，右键属性会是一片空白，看起来像个来路不明的程序 ——
 # 发给别人体验时这点很影响信任感。
+#
+# 两份字符串表：Windows 按自己的界面语言挑对应那份显示。
+# 只有中文那份的话，英文系统的用户在属性页里看到的全是中文，
+# 而我们这个版本是发给国外用户用的，所以英文表放在前面（找不到匹配时用它兜底）。
 VSVersionInfo(
     ffi=FixedFileInfo(
         filevers=(1, 0, 0, 0),
@@ -14,6 +18,22 @@ VSVersionInfo(
     ),
     kids=[
         StringFileInfo([
+            # 英文（0409 = en-US，04B0 = Unicode）
+            StringTable(
+                "040904B0",
+                [
+                    StringStruct("CompanyName", "PDF Drawing Translator · open source"),
+                    StringStruct("FileDescription",
+                                 "Translate engineering drawings (PDF) in place"),
+                    StringStruct("FileVersion", "1.0.0.0"),
+                    StringStruct("InternalName", "PDFTranslator"),
+                    StringStruct("LegalCopyright", "MIT License"),
+                    StringStruct("OriginalFilename", "PDF图纸翻译.exe"),
+                    StringStruct("ProductName", "PDF Drawing Translator"),
+                    StringStruct("ProductVersion", "1.0.0.0"),
+                ],
+            ),
+            # 中文（0804 = zh-CN，04B0 = Unicode）
             StringTable(
                 "080404B0",
                 [
@@ -28,6 +48,6 @@ VSVersionInfo(
                 ],
             )
         ]),
-        VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+        VarFileInfo([VarStruct("Translation", [1033, 1200, 2052, 1200])]),
     ],
 )
