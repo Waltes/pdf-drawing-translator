@@ -51,3 +51,24 @@ ExitSetupTitle=退出安装
 ExitSetupMessage=安装还没完成，现在退出程序不会装上。%n%n确定要退出吗？
 ConfirmUninstall=确定要卸载 %1 吗？
 UninstalledAll=%1 已经卸载完成。
+WizardUninstalling=卸载进度
+WizardUserInfo=用户信息
+YesRadio=是，现在就重启电脑(&Y)
+NoRadio=不，我自己稍后重启(&N)
+
+[CustomMessages]
+; 这一段对应官方 Default.isl 里的 [CustomMessages]。不补齐的话编译时
+; 每条都会报一次「未定义、回落到英文」，而且用户真碰到时（比如卸载时
+; 安装目录已被手动删掉）中文界面里会突然蹦一句英文，看着像程序出错。
+NameAndVersion=%1 版本 %2
+AdditionalIcons=附加快捷方式：
+CreateDesktopIcon=创建桌面快捷方式(&D)
+CreateQuickLaunchIcon=创建快速启动栏快捷方式(&Q)
+ProgramOnTheWeb=%1 官网
+UninstallProgram=卸载 %1
+LaunchProgram=运行 %1
+AssocFileExtension=把 %1 与 %2 文件扩展名关联(&A)
+AssocingFileExtension=正在把 %1 与 %2 文件扩展名关联...
+AutoStartProgramGroupDescription=启动：
+AutoStartProgram=自动启动 %1
+AddonHostProgramNotFound=在您选择的文件夹里没有找到 %1。%n%n要把它从应用列表里移除、继续卸载吗？

@@ -1651,8 +1651,12 @@ class App(GlassWindow):
         # ---- 翻译设置：方向 + 输出单位 + 输出目录 ----
         # 这三项放一张卡里，是因为它们都属于「这一次转换怎么干」，
         # 和上面的文件列表、下面的开始按钮是同一条动线上的东西。
+        # 高度必须显式给：Card 是 Canvas，不传 height 时它按 Tk 默认的
+        # 字符高度报期望值（实测报到 265），_fit_vertical 拿它做预算就会
+        # 把拖拽区和文件列表白压一截。这里按内容算：
+        # 上下 padding 24 + 下拉行 30 + 行距 8 + 输出目录行 28 = 90，留 6 余量
         self.card_opt = Card(host, t, radius=12, padding=12, shadow=12,
-                             shadow_alpha=100)
+                             shadow_alpha=100, height=96)
         self.card_opt.pack(fill="x", pady=(0, t.px(12)))
         ob = self.card_opt.body
 
@@ -1716,9 +1720,12 @@ class App(GlassWindow):
         self.pbar.bind("<Configure>", lambda e: self._draw_progress())
 
         # 日志
+        # 高度不交给 expand 自动分：expand 会跟上面的卡片抢剩余空间，
+        # 抢不到时整个区被压成 0，客户那边「提示框消失」就是这么来的。
+        # 改成固定高度，由 _fit_vertical 按窗口实际高度算给它
         self.card_log = Card(host, t, radius=14, padding=12, shadow=12,
                              shadow_alpha=100)
-        self.card_log.pack(fill="both", expand=True)
+        self.card_log.pack(fill="both")
         self.log = tk.Text(self.card_log.body, bg=CARD_BG, fg=TEXT_DIM, bd=0,
                            relief="flat", highlightthickness=0, wrap="word",
                            font=t.font(t.font_size - 1), padx=t.px(2),
@@ -1740,6 +1747,112 @@ class App(GlassWindow):
                             spacing1=t.px(10), spacing3=t.px(6))
 
         self._say(T("准备就绪。把 PDF 图纸拖进来，或点击上方区域选择文件。"), "dim")
+
+        # 控件建完、拿到各自的期望高度之后再分配，顺序不能提前
+        self._fit_vertical()
+
+    # ----------------------------- 高度自适应 -----------------------------
+    def _on_configure(self, event=None):
+        """
+        窗口被拖动改变尺寸后，重新分配高度。
+
+        主窗口支持八向缩放（GlassWindow 自带），客户把窗口往上拉一点，
+        内容就又会溢出，按钮重新消失。圆角那边由父类处理，这里只管布局。
+
+        延迟 260ms 合并：拖动时每像素都会触发一次 Configure，
+        每次都重排卡片会拖慢拖拽手感，而且 Card 重绘圆角阴影本身不便宜。
+        """
+        super()._on_configure(event)
+        if event is not None and event.widget is not self.win:
+            return
+        # _fit_vertical 会改卡片高度，改高度又触发 Configure，不挡住就是死循环
+        if getattr(self, "_in_fit", False):
+            return
+        job = getattr(self, "_fit_job", None)
+        if job:
+            try:
+                self.win.after_cancel(job)
+            except Exception:
+                pass
+        self._fit_job = self.win.after(260, self._refit)
+
+    def _refit(self):
+        """防抖后真正重排一次"""
+        self._fit_job = None
+        try:
+            w, h = self.win.winfo_width(), self.win.winfo_height()
+            # 最小化或还没映射时尺寸是 1x1，拿它算会把界面压没
+            if w < 200 or h < 200:
+                return
+            # 高度没实质变化就跳过，避免在收敛点上来回抖
+            if abs(h - getattr(self, "_fitted_h", 0)) < 6:
+                return
+            self._fitted_h = h
+            self._size = (w, h)
+            self._in_fit = True
+            self._fit_vertical()
+        finally:
+            self._in_fit = False
+
+    def _fit_vertical(self):
+        """
+        按窗口实际高度重新分配三块可变区域，保证「开始转换」和日志区留在窗内。
+
+        为什么必须算：界面按 840 逻辑像素排，而窗口高度会被屏幕限制
+        （GlassWindow 里 h = min(px(840), 屏幕高 - px(90))）。1280x768 的机器、
+        或 125% 缩放的 1080p 屏，窗口只剩 650 上下，可卡片全是固定高度、
+        pack 从上往下分，空间不够时最后打包的按钮和日志区直接拿到 0 高度。
+        客户报的「按钮和提示框消失」就是这样来的，不是控件被删掉。
+
+        分配顺序：固定区域先扣掉，剩下的给拖拽区、文件列表、日志区。
+        三块都有下限，真的连下限都放不下时按 日志 > 列表 > 拖拽区 的
+        顺序牺牲，主按钮和设置项必须留着 —— 那是用户能完成任务的唯一路径。
+        """
+        t = self.theme
+        # 这里不能调 update_idletasks：Card 是 Canvas，尺寸一变就重画整张
+        # 圆角阴影图，强制刷新会在初始化阶段反复触发 <Configure>，直接把
+        # 启动卡死（实测）。winfo_reqheight 读的是期望高度，控件一建好就有效，
+        # 不需要先把界面刷一遍。
+        gap = t.px(12)
+        title_h = self.title_bar.winfo_reqheight()
+        # host 可用高度：窗口高 - 标题栏 - 底部留白
+        avail = self._size[1] - title_h - t.px(12)
+        # 固定不动的部分，加上它们之间的间距（四段 12，两段 8）
+        fixed = (self.card_strip.winfo_reqheight()
+                 + self.card_opt.winfo_reqheight()
+                 + self.btn.winfo_reqheight()
+                 + self.pbar.winfo_reqheight()
+                 + gap * 4 + t.px(8) * 2)
+        flex = avail - fixed
+
+        d_max, l_max = t.px(132), t.px(186)      # 宽裕时的样子
+        d_min, l_min = t.px(82), t.px(96)        # 保底高度
+        g_min = t.px(60)
+
+        room = flex - g_min
+        if room >= d_max + l_max:
+            drop_h, list_h = d_max, l_max
+        elif room > 0:
+            # 空间不够就按比例压，但不跌破各自下限
+            r = float(room) / (d_max + l_max)
+            drop_h = max(d_min, int(d_max * r))
+            list_h = max(l_min, int(l_max * r))
+        else:
+            drop_h, list_h = d_min, l_min
+
+        log_h = flex - drop_h - list_h
+        if log_h < t.px(44):
+            # 还是放不下：先压日志到 44，不够再压列表，最后才动拖拽区
+            need = t.px(44) - log_h
+            list_h = max(int(l_min * 0.72), list_h - need)
+            need = t.px(44) - (flex - drop_h - list_h)
+            if need > 0:
+                drop_h = max(int(d_min * 0.72), drop_h - need)
+            log_h = flex - drop_h - list_h
+
+        self.card_drop.config(height=max(drop_h, t.px(60)))
+        self.card_list.config(height=max(list_h, t.px(64)))
+        self.card_log.config(height=max(log_h, t.px(34)))
 
     # ----------------------------- 三个下拉 -----------------------------
     def _fit_select(self, sel, cap):
