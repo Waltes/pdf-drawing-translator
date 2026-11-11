@@ -268,9 +268,9 @@ part:
   writes over the original, at the cost of compressed font sizes and labels that may cover
   drawing lines. A clean result requires the drawing to be re-exported with text kept as
   text.
-- Selectable text only. Scanned or image-only drawings have no text layer. With
-  `rapidocr-onnxruntime` installed the bitmaps are recognised, at lower accuracy than real
-  text.
+- Selectable text only. Scanned or image-only drawings have no text layer. The program
+  recognises the bitmaps, at lower accuracy than real text. The recognition models ship
+  with the installer: nothing else to install, and nothing leaves the machine.
 - A bare lowercase `12 in` with a space and no period is not recognised, because `in` is
   far too often a preposition. `4in`, `4 in.` and `4 IN` are recognised.
 - Text sitting on a busy background is left alone rather than repainted, and listed as
@@ -309,8 +309,8 @@ python -m PyInstaller packaging/PDFTranslator.spec --noconfirm
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
 ```
 
-The build excludes the OCR engine, which saves about 100 MB, and excludes any user
-configuration.
+The build bundles the OCR engine (about 200 MB unpacked) and excludes any user
+configuration. The installer lands around 75 MB.
 
 Tests:
 

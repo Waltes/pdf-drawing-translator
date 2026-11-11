@@ -26,17 +26,43 @@ import pymupdf
 
 from .paths import DATA_DIR
 
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    HAS_OCR = True
-except Exception:
-    HAS_OCR = False
+# OCR 组件与 numpy 都改成惰性加载（首次真正要用图像模式时才导入）。
+#
+# 为什么不放在模块顶层：安装包已经把 rapidocr / onnxruntime / cv2 / numpy
+# 一并打了进去，这四样加起来两百多兆，导入要花两三秒、常驻内存上百兆。
+# 而绝大多数图纸是有文字层的，走常规流程就够了，一辈子用不到图像模式。
+# 顶层导入等于让所有人每次启动都为一个可能不用的功能付代价。
+_OCR_CLASS = None     # 缓存 RapidOCR 类；None 表示还没探测过
+_OCR_PROBED = False   # 区分「没探测过」和「探测过但没有」
+_NP = None            # 缓存 numpy 模块
 
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except Exception:
-    HAS_NUMPY = False
+
+def ocr_available():
+    """
+    OCR 组件是否可用。第一次调用才真正导入，结果会缓存。
+
+    打包版里组件随安装包一起来，正常不会失败；源码运行时没装就会返回 False，
+    界面据此如实告知「图像模式用不了」，而不是让用户点完等半天没反应。
+    """
+    global _OCR_CLASS, _OCR_PROBED
+    if not _OCR_PROBED:
+        _OCR_PROBED = True
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _OCR_CLASS = RapidOCR
+        except Exception:
+            _OCR_CLASS = None
+    return _OCR_CLASS is not None
+
+
+def _numpy():
+    """取 numpy 模块，首次调用时导入并缓存。"""
+    global _NP
+    if _NP is None:
+        import numpy as _mod
+        _NP = _mod
+    return _NP
+
 
 ZOOM = 4              # 位图渲染倍率，4 倍能让 6pt 的小字被稳定识别
 ZOOM_LARGE = 3        # 整页级别的大图用 3 倍，兼顾识别率与速度
@@ -75,9 +101,12 @@ def ocr_lang(text):
 
 
 def _get_ocr():
+    """取 OCR 引擎单例。引擎初始化要加载三个 onnx 模型，只在首次调用时做一次。"""
     global _ocr_engine
     if _ocr_engine is None:
-        _ocr_engine = RapidOCR()
+        if not ocr_available():
+            raise RuntimeError("OCR 组件不可用")
+        _ocr_engine = _OCR_CLASS()
     return _ocr_engine
 
 
@@ -136,6 +165,7 @@ def sample_colors(arr, rect, zoom, clip):
 
     返回 (背景RGB, 文字RGB, 背景标准差)；背景太花或对比度不足返回 None。
     """
+    np = _numpy()   # 惰性取的，见模块顶部说明
     h = max(rect.height, 1.0)
     pad = pymupdf.Rect(rect.x0 - h * 0.45, rect.y0 - h * 0.42,
                        rect.x1 + h * 0.45, rect.y1 + h * 0.42)
@@ -261,11 +291,12 @@ def process_page_images(page, translate_fn, used_rects, report,
 
     返回改写条数
     """
-    if not (HAS_OCR and HAS_NUMPY):
+    if not ocr_available():
         if untranslated is not None:
-            untranslated.append(("图片内文字", "未安装 OCR 组件，位图里的文字未处理"))
+            untranslated.append(("图片内文字", "OCR 组件不可用，位图里的文字未处理"))
         return 0
 
+    np = _numpy()   # 惰性取的，见模块顶部说明
     regions = find_image_regions(page, force_full=force_full)
     if not regions:
         return 0

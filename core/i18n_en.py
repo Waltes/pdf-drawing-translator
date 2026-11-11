@@ -410,14 +410,16 @@ EN = {
     "   直接翻译不会有任何变化。要拿到干净译文，请让制图方重新导出带文字的 PDF。":
         "   Translating it will change nothing. For a clean result, ask whoever "
         "produced the drawing to re-export the PDF with text kept as text.",
-    "   已跳过。图像模式需要 OCR 组件，当前环境未安装。":
-        "   Skipped. Image mode needs the OCR component, which is not installed.",
+    "   已跳过。图像模式所需的 OCR 组件加载失败，建议重新安装本程序。":
+        "   Skipped. The OCR component required by image mode failed to load. "
+        "Reinstalling the application should fix it.",
     "   已跳过这份文件。": "   Skipped this file.",
     "   未发现可翻译的文字，这份文件没有生成有效译文。":
         "   No translatable text was found. No usable translation was produced.",
     "文字已转成曲线": "Text converted to outlines",
     "转曲 PDF 识别": "Detect outlined PDF",
     "OCR 文字语言判定": "OCR text language detection",
+    "OCR 引擎": "OCR engine",
     "这份 PDF 的文字是图形，没有可编辑的文字层，常规翻译不会有任何变化。\n\n"
     "是否用图像模式尝试：整页识别，盖掉原文再写译文？\n"
     "效果有限：字号会被压缩，个别位置可能压到线框。\n\n"

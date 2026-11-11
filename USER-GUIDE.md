@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.1
+Version 1.0.2
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -45,7 +45,7 @@ sending Chinese drawings to overseas customers.
 | Item | Requirement |
 |---|---|
 | Operating system | Windows 10 or later, 64-bit |
-| Disk space | about 30 MB for the installer, about 90 MB installed |
+| Disk space | about 75 MB for the installer, about 240 MB installed |
 | Memory | 4 GB or more recommended |
 | AI endpoint | optional; the program runs without one, with the limits described in 4.1 |
 | From source | Python 3.10 or later, python.org build with tcl/tk |
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.1.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.2.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -705,7 +705,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.1.exe`, about 30 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.2.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

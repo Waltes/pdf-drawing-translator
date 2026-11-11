@@ -2185,9 +2185,10 @@ class App(GlassWindow):
                     self.msg_q.put(("log", (
                         T("   直接翻译不会有任何变化。要拿到干净译文，"
                           "请让制图方重新导出带文字的 PDF。"), "warn")))
-                    if not image_text.HAS_OCR:
+                    if not image_text.ocr_available():
                         self.msg_q.put(("log", (
-                            T("   已跳过。图像模式需要 OCR 组件，当前环境未安装。"),
+                            T("   已跳过。图像模式所需的 OCR 组件加载失败，"
+                              "建议重新安装本程序。"),
                             "warn")))
                         continue
                     if not self._ask_main(
@@ -2591,6 +2592,40 @@ def _selftest():
                   and image_text.ocr_lang("38.10") == "none")
         except Exception as exc:
             check(T("OCR 文字语言判定"), False, f"{type(exc).__name__}: {exc}")
+
+        # OCR 引擎能不能真的跑起来（图像模式的全部依赖）。
+        # 只判断「导入成功」不够：安装包里 onnxruntime 的 dll、cv2 的 pyd、
+        # rapidocr 的三个 onnx 模型文件少任何一个，导入都能过，
+        # 真正识别时才抛异常，而那时候用户已经在等结果了。
+        # 所以这里现造一张带字的图，走一遍完整识别，拿到文字才算过。
+        try:
+            from core import image_text
+            ok = image_text.ocr_available()
+            detail = ""
+            if ok:
+                probe_png = os.path.join(tmp, "ocr_probe.png")
+                pd3 = pymupdf.open()
+                pg3 = pd3.new_page()
+                rect3 = pymupdf.Rect(0, 0, 160, 90)
+                try:
+                    # 用内置中文字体写，识别结果才和实际图纸上的中文标注一致
+                    pg3.insert_text((20, 55), "零件名称", fontsize=16,
+                                    fontname="china-s")
+                except Exception:
+                    # 极少数环境没有内置中文字体，退化成拉丁字母，
+                    # 同样能验证「模型加载 + 推理」这条链路是否通
+                    pg3.insert_text((20, 55), "PART NAME", fontsize=16)
+                pg3.get_pixmap(matrix=pymupdf.Matrix(3, 3), clip=rect3).save(probe_png)
+                pd3.close()
+                res, _ = image_text._get_ocr()(probe_png)
+                texts = [str(r[1]).strip() for r in (res or []) if str(r[1]).strip()]
+                ok = bool(texts)
+                detail = "识别到：" + " / ".join(texts[:3]) if texts else "识别不到文字"
+            else:
+                detail = "OCR 组件不可用"
+            check(T("OCR 引擎"), ok, detail)
+        except Exception as exc:
+            check(T("OCR 引擎"), False, f"{type(exc).__name__}: {exc}")
 
         dst = os.path.join(tmp, "out.pdf")
         stats = {}
