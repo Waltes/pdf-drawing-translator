@@ -143,8 +143,11 @@ press Test connection.
 | Local model | `http://127.0.0.1:11434/v1` | ollama, LM Studio, vLLM |
 | Custom | any OpenAI-compatible URL | |
 
-The key is stored only in `%APPDATA%\PDFDrawingTranslator\data\config.json`. It is never
-uploaded, and `.gitignore` keeps it out of the repository.
+The key is stored in `%APPDATA%\PDFDrawingTranslator\data\config.json`. It is never
+uploaded, and `.gitignore` keeps it out of the repository. A second, encrypted copy lives
+one level up at `apikey.dat` (Windows account-level DPAPI, no plaintext on disk), so a
+reinstall after uninstalling still picks the key up. The uninstaller only removes the
+`data` subfolder, which leaves that copy untouched.
 
 ### Running the model on your own machine
 
@@ -218,7 +221,9 @@ Two local files are worth knowing about:
 - `%APPDATA%\PDFDrawingTranslator\data\cache.json` holds source and translation pairs in
   plain text, up to 20,000 entries. It is a readable copy of your text; delete it before
   handing the machine to someone else.
-- `config.json` holds the API key in plain text.
+- `config.json` holds the API key in plain text. The encrypted copy at
+  `%APPDATA%\PDFDrawingTranslator\apikey.dat` holds the same key and is readable only by
+  the same Windows account on the same machine.
 
 To keep everything on one machine, select the local provider. The only traffic then is
 loopback.

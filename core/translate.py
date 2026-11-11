@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -28,6 +29,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from . import dict_engine
 from . import i18n
+from . import paths
 from .llm_client import (LLMClient, PRESETS, preset_for, price_of)
 from .paths import DATA_DIR
 
@@ -953,9 +955,82 @@ def default_config():
     }
 
 
+def _restore_api_key(cfg, saved):
+    """
+    让配置里的 key 和独立保存的那份保持一致。返回 True 表示 key 是从独立文件补回来的。
+
+    为什么要这一步：客户丢过一次 key。他卸载后重装，卸载时被问「配置和翻译缓存
+    要不要一起删」，点了「是」，config.json 连 key 一起没了；而他当初填 key 时
+    没留底，丢了只能回来找我们。现在 key 在 data 的上一级另存一份（见
+    paths.secret_file），卸载删不到，启动时发现配置里没有就补回来。
+
+    两个方向都管：
+      · 配置里有 key、独立文件没有或不一致 —— 补写独立文件（顺手留个底）
+      · 配置里没有 —— 还要看是用户自己清空的，还是配置丢了：
+        文件不存在、读不出来、连 api_key 这个键都没有，都算丢，补回来；
+        文件好着、api_key 键在、值是空的，那是用户自己删的，尊重他，
+        并且把独立文件也清掉，否则下次启动它又冒出来，用户会以为删不掉。
+
+    saved 是磁盘上的原始内容，None 表示文件不存在或解析失败。
+    """
+    try:
+        from . import secret
+    except Exception:
+        return False
+
+    llm = cfg.setdefault("llm", {})
+    current = (llm.get("api_key") or "").strip()
+    backup = secret.load_key()
+
+    if current:
+        if backup != current:
+            secret.save_key(current)
+        return False
+
+    # 用户在界面上主动清空的：配置里留着空的 api_key 键
+    if saved is not None and "api_key" in (saved.get("llm") or {}):
+        if backup:
+            secret.clear_key()
+        return False
+
+    if not backup:
+        return False
+
+    llm["api_key"] = backup
+    try:
+        save_config(cfg)            # 写回配置，下次启动就走正常路径了
+    except Exception:
+        pass
+    return True
+
+
+def _restore_config_backup():
+    """
+    config.json 整个不见了（卸载时勾了「删配置」）时，用安装器留下的备份还原。
+
+    安装器每次覆盖安装前会把当前 config.json 复制成上一级的 config.bak.json，
+    它在 data 外面，卸载删不到。用户「卸载 → 重装」之后，这份备份就是翻译方向、
+    输出单位、AI 模型名这些设置的唯一存根；API key 另有 apikey.dat 专门兜。
+
+    只在 config.json 不存在时还原，绝不覆盖用户正在用的配置 ——
+    否则用户改完设置一升级，反而被还原成旧的。
+    """
+    bak = paths.config_backup_file()
+    if os.path.exists(CONFIG_PATH) or not os.path.exists(bak):
+        return False
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        shutil.copy2(bak, CONFIG_PATH)
+        return True
+    except Exception:
+        return False
+
+
 def load_config():
     """读取配置文件；不存在则返回默认配置"""
+    _restore_config_backup()
     cfg = default_config()
+    saved = None
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -979,7 +1054,12 @@ def load_config():
                                   or llm.get("provider") == "local"
                                   or is_local_url(llm.get("base_url") or ""))
         except Exception:
-            pass
+            # 文件在但读不出来（损坏、权限、写到一半被打断）。
+            # 当成「没有配置」处理 —— 后面的 key 恢复要靠这个判断，
+            # 不能静默当成「用户主动清空」，否则正好把要救的 key 当成用户意图。
+            saved = None
+            cfg = default_config()
+    _restore_api_key(cfg, saved)
     return cfg
 
 
@@ -988,6 +1068,15 @@ def save_config(cfg):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # key 另存一份到卸载删不到的位置。这一步失败不影响配置已经存好，
+    # 所以不往外抛：备份丢了是遗憾，存配置失败才是故障。
+    key = ((cfg.get("llm") or {}).get("api_key") or "").strip()
+    if key:
+        try:
+            from . import secret
+            secret.save_key(key)
+        except Exception:
+            pass
 
 
 class Translator:

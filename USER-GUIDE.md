@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.2
+Version 1.0.3
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.2.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.3.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -101,6 +101,23 @@ cannot break writes.
 The folder name is plain ASCII. If you ran an earlier build whose data lived in
 `%APPDATA%\PDF图纸翻译`, it is moved over automatically on first launch, together with your
 API key and glossary.
+
+The API key is kept in two places. Besides `config.json` inside `data`, an encrypted copy
+sits one level up:
+
+| File | Location | Purpose |
+|---|---|---|
+| `apikey.dat` | `%APPDATA%\PDFDrawingTranslator\` | encrypted copy of the API key |
+| `config.bak.json` | `%APPDATA%\PDFDrawingTranslator\` | settings backup taken before an upgrade |
+
+Neither file is inside `data`, so uninstalling cannot remove them. On the first launch
+after a reinstall, an empty key in the configuration is filled back in from `apikey.dat`;
+if `config.json` is missing entirely, it is restored from `config.bak.json` first. An
+overwrite install, an uninstall and reinstall, and a deleted configuration all keep your
+key.
+
+`apikey.dat` is encrypted with DPAPI, tied to the current Windows account on this machine.
+Moving to another computer or another Windows account requires entering the key again.
 
 To confirm the environment, run the self-test from a command prompt:
 
@@ -161,8 +178,12 @@ the desktop.
 ### 3.6 Uninstall
 
 Uninstall from the Windows settings app list. The uninstaller asks whether to delete your
-configuration and translation cache, which hold your API key and glossary. They are kept
-by default. Keeping them means a reinstall resumes where you left off.
+glossary and translation cache. They are kept by default. Choosing to delete removes the
+`data` subfolder only: the API key and the pre-upgrade settings backup live one level
+above it and always survive, so a reinstall does not ask for the key again.
+
+To remove everything, delete the whole `%APPDATA%\PDFDrawingTranslator` folder after
+uninstalling.
 
 ---
 
@@ -242,12 +263,13 @@ support it; Qwen and Zhipu do not, and the estimate is then the only guide.
 | Local model | ollama, LM Studio, vLLM; no cost, no key, needs VRAM |
 | Custom | any OpenAI-compatible endpoint |
 
-The key is written only to the local configuration file:
+The key is written to the local configuration file:
 
 - Installed: `%APPDATA%\PDFDrawingTranslator\data\config.json`
 - From source: `data/config.json` in the program folder
 
-The bottom of the settings window shows the actual path.
+An encrypted copy is kept one level above the data folder, which is how the key survives
+an uninstall. See 3.3. The bottom of the settings window shows the actual path.
 
 ### 4.4 Running the model on your own machine
 
@@ -326,7 +348,8 @@ Two local files are worth knowing about:
 - `%APPDATA%\PDFDrawingTranslator\data\cache.json` holds source and translation pairs in
   plain text, up to 20,000 entries. It is a readable copy of your text; delete it before
   handing the machine to someone else.
-- `config.json` holds the API key in plain text.
+- `config.json` holds the API key in plain text. The encrypted copy one level up at
+  `apikey.dat` holds the same key readable only by this Windows account on this machine.
 
 To keep everything on one machine, select the local provider. The only traffic then is
 loopback.
@@ -705,7 +728,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.2.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.3.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

@@ -2543,6 +2543,45 @@ def _selftest():
     except Exception as exc:
         check(T("配置读写"), False, f"{type(exc).__name__}: {exc}")
 
+    # API key 能不能在「卸载删配置」之后活下来。客户实际丢过一次，而他填完
+    # key 没留底，丢了只能回来找我们 —— 这条盯的就是它。
+    #
+    # 要验的不是「能加密」，是两件在真机上缺一不可的事：
+    #   1. 密文里不能出现明文。否则 apikey.dat 被别的程序拷走就等于送 key。
+    #   2. 文件必须落在 data 的上一级。写进 data 里，卸载时跟配置一起被删，
+    #      而这一步照样报通过 —— 这个坑真踩过，所以位置也断言进去。
+    try:
+        import shutil
+        from core import paths as _paths
+        from core import secret as _secret
+
+        outside = (os.path.dirname(_paths.secret_file())
+                   == os.path.dirname(_paths.DATA_DIR)
+                   and os.path.dirname(_paths.config_backup_file())
+                   == os.path.dirname(_paths.DATA_DIR))
+
+        keep_dir = _paths.DATA_DIR
+        tmp_dir = tempfile.mkdtemp()
+        probe_key = "sk-selftest-0123456789"
+        back, no_plain = "", False
+        try:
+            # 换到临时目录再跑，绝不能动用户真正在用的那一份
+            _paths.DATA_DIR = os.path.join(tmp_dir, "data")
+            _secret.save_key(probe_key)
+            back = _secret.load_key()
+            with open(_paths.secret_file(), "rb") as f:
+                no_plain = probe_key.encode() not in f.read()
+        finally:
+            _paths.DATA_DIR = keep_dir
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        passed = bool(back == probe_key and no_plain and outside)
+        check(T("API key 独立保存"), passed,
+              T("加密后不含明文，存放在数据目录之外") if passed else
+              f"readback={bool(back == probe_key)} no_plain={no_plain} outside={outside}")
+    except Exception as exc:
+        check(T("API key 独立保存"), False, f"{type(exc).__name__}: {exc}")
+
     # 系统字体：写入中文全靠它，缺了会出一堆空白方块
     cjk_font = None
     for p in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf",

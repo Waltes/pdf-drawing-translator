@@ -185,3 +185,34 @@ def ensure_seed_files():
 def user_file(name):
     """数据目录下一个文件的完整路径"""
     return os.path.join(DATA_DIR, name)
+
+
+def secret_file():
+    """
+    API key 独立备份文件的路径（内容由 core.secret 负责加解密）。
+
+    位置刻意比数据目录高一级：
+
+        %APPDATA%\\PDFDrawingTranslator\\apikey.dat          ← 这里，卸载不碰
+        %APPDATA%\\PDFDrawingTranslator\\data\\config.json    ← 卸载删的是这个
+
+    卸载程序会问「术语库和翻译缓存要不要一起删」，用户点「是」时删的是
+    data 子目录。key 要是也躺在 config.json 里，就跟着一起没了 —— 客户正是
+    这么丢过 key。放进 data 里等于这份备份白做，所以必须放在它的上一级。
+
+    源码运行时同理，落在项目根（data 的上一级）。不做 FROZEN 分支：
+    开发时和打包后走两套路径，测出来的结论就不作数了 —— 这个坑真踩过，
+    自测全绿，装完照样丢。
+    """
+    return os.path.join(os.path.dirname(DATA_DIR), "apikey.dat")
+
+
+def config_backup_file():
+    """
+    安装器在覆盖安装前留下的配置备份。
+
+    和 apikey.dat 一样放在数据目录的上一级：用户选「删配置」时它还在，
+    重装后程序发现 config.json 没了可以从这里捞回来（翻译方向、输出单位、
+    AI 模型名都在里面）。
+    """
+    return os.path.join(os.path.dirname(DATA_DIR), "config.bak.json")

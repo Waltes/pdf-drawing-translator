@@ -12,6 +12,12 @@ data/selftest.log
 data/_ocr_tmp.png
 data/prices.json
 
+# API key 的加密备份和安装前的配置备份。源码运行时落在项目根（data 的上一级），
+# 打包后落在 %APPDATA%\PDFDrawingTranslator\。里面是密钥，任何情况都不进仓库。
+apikey.dat
+apikey.dat.tmp
+config.bak.json
+
 # 运行日志
 启动错误.log
 *.log

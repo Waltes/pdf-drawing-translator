@@ -61,7 +61,8 @@ Windows 上请用 python.org 的完整安装包。微软商店版不带 tkinter�
 ### 方式一：安装包
 
 下载 `PDFTranslator_Setup_x.y.z.exe`，双击运行。桌面和开始菜单会创建快捷方式，按当前
-用户安装，不请求管理员权限。卸载走 Windows 设置中的应用列表，可以一并删除配置和缓存（默认保留）。
+用户安装，不请求管理员权限。卸载走 Windows 设置中的应用列表，可以一并删除术语库和翻
+译缓存（默认保留）；API 密钥无论选哪个都保留，重装后自动恢复，不需要重新填写。
 
 装完可运行一次自检，确认环境正常（离线、免费、几秒钟）：
 
@@ -132,8 +133,10 @@ BR-01-Fence-Brace/
 | 本机部署 | `http://127.0.0.1:11434/v1` | ollama、LM Studio、vLLM |
 | 自定义 | 任意 OpenAI 兼容地址 | |
 
-密钥只写在本机 `%APPDATA%\PDFDrawingTranslator\data\config.json`，不上传，`.gitignore`
-也把它排除在仓库之外。
+密钥写在本机 `%APPDATA%\PDFDrawingTranslator\data\config.json`，不上传，`.gitignore`
+也把它排除在仓库之外。同一目录的上一级还存有一份加密副本 `apikey.dat`（Windows 账户级
+加密，明文不落盘），用来在卸载删掉配置后重装时自动恢复密钥。卸载程序只删 `data` 子目
+录，这份副本不在其中。
 
 ### 在自己机器上跑模型
 
@@ -195,7 +198,8 @@ BR-01-Fence-Brace/
 
 - `%APPDATA%\PDFDrawingTranslator\data\cache.json` 保存原文与译文的明文对照，最多
   2 万条。它本身就是一份可读的文字副本，机器交给别人之前请删除。
-- `config.json` 中保存明文的 API key。
+- `config.json` 中保存明文的 API key；同目录上一级的 `apikey.dat` 是它的加密副本，
+  只能被本机同一个 Windows 账户解开。
 
 想彻底不出网，选择“本机部署”即可，那时唯一的网络流量是回环地址。
 

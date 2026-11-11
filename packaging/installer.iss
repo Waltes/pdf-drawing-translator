@@ -29,7 +29,7 @@
 
 #define AppName "PDF 图纸翻译"
 #define AppNameEn "PDF Drawing Translator"
-#define AppVer "1.0.2"
+#define AppVer "1.0.3"
 #define AppExe "PDF图纸翻译.exe"
 #define AppPublisher "Walter"
 
@@ -76,8 +76,8 @@ en.SamplesFolder=Sample drawings
 zh.SamplesFolder=示例图纸
 en.ShortcutGuide=User guide
 zh.ShortcutGuide=使用说明
-en.KeepDataPrompt=Also delete your settings and translation cache?%n%nKeeping them means a reinstall picks up where you left off (your API key and glossary live there).%n%nChoose Yes to delete:
-zh.KeepDataPrompt=是否一并删除配置和翻译缓存？%n%n留着的话，以后重装还能接着用（里面有你自己填的 API key 和术语库）。%n%n选「是」会删掉这些：
+en.KeepDataPrompt=Also delete your glossary and translation cache?%n%nYour API key is kept either way - it is stored separately, so a reinstall will not ask for it again.%n%nChoose Yes to delete:
+zh.KeepDataPrompt=是否一并删除术语库和翻译缓存？%n%nAPI key 无论选哪个都会保留：它单独存了一份，重装后不用重新填写。%n%n选「是」会删掉这些：
 en.KeepDataTitle=Uninstall
 zh.KeepDataTitle=卸载
 
@@ -115,27 +115,59 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:RunAfterInstall}"; Flags: nowait 
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-// 卸载收尾时问一句：配置和翻译缓存要不要一起删。
+// 覆盖安装之前，先把当前的 config.json 复制一份到数据目录的上一级。
+//
+// 为什么要这一步：卸载程序会问「术语库和翻译缓存要不要一起删」，用户点「是」，
+// config.json 就没了 —— 翻译方向、输出单位、AI 模型名全部回到默认值。
+// API key 另有 apikey.dat 单独兜着，但其余设置也值得救，毕竟用户调过一遍。
+//
+// 备份放在 data 的上一级：卸载删的是 data 子目录，备份在它外面就删不到。
+// 程序启动时发现 config.json 不存在，会自动把它复制回来（见 translate.py
+// 的 _restore_config_backup）。
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Src, Bak: String;
+begin
+  if CurStep = ssInstall then
+  begin
+    Src := ExpandConstant('{userappdata}\PDFDrawingTranslator\data\config.json');
+    Bak := ExpandConstant('{userappdata}\PDFDrawingTranslator\config.bak.json');
+    if FileExists(Src) then
+    begin
+      ForceDirectories(ExtractFileDir(Bak));
+      // 第三个参数 False = 已存在就覆盖。备份要跟着最新配置走，
+      // 留住第一次的那份只会在装了几轮之后还原出一个很旧的设置。
+      FileCopy(Src, Bak, False);
+    end;
+  end;
+end;
+
+// 卸载收尾时问一句：术语库和翻译缓存要不要一起删。
 // 直接删掉用户的术语库，是最容易挨骂的做法；直接留着，硬盘里又会悄悄堆几百兆。
+//
+// 注意这里**不再删整个** PDFDrawingTranslator 目录，只删里面的 data 子目录：
+// 同级的 apikey.dat（加密保存的 API key）和 config.bak.json（安装前备份）
+// 必须留着，否则用户装回来还得重新申请 key —— 而多数人填完 key 就没留底。
 //
 // 要问两个目录：一个是现在的 %APPDATA%\PDFDrawingTranslator，
 // 一个是老版本的 %APPDATA%\PDF图纸翻译。程序启动时会把老的搬进新的，
-// 但搬不动（文件被占用、权限不足）时老目录还留在原地，卸载不能把它落下，
-// 否则用户选「是」删干净了，硬盘里还藏着一份带 API key 的旧配置。
+// 但搬不动（文件被占用、权限不足）时老目录还留在原地，卸载不能把它落下。
+// 老目录没有 key 独立存储这套结构，整个删掉是对的。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  DataDir, LegacyDir, Targets: String;
+  DataDir, DataSub, LegacyDir, Targets: String;
   Found: Boolean;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
     DataDir := ExpandConstant('{userappdata}\PDFDrawingTranslator');
+    DataSub := DataDir + '\data';
     LegacyDir := ExpandConstant('{userappdata}\PDF图纸翻译');
     Targets := '';
     Found := False;
-    if DirExists(DataDir) then
+    if DirExists(DataSub) then
     begin
-      Targets := DataDir;
+      Targets := DataSub;
       Found := True;
     end;
     if DirExists(LegacyDir) then
@@ -151,8 +183,8 @@ begin
       if MsgBox(ExpandConstant('{cm:KeepDataPrompt}') + #13#10 + Targets,
                 mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       begin
-        if DirExists(DataDir) then
-          DelTree(DataDir, True, True, True);
+        if DirExists(DataSub) then
+          DelTree(DataSub, True, True, True);
         if DirExists(LegacyDir) then
           DelTree(LegacyDir, True, True, True);
       end;

@@ -320,6 +320,9 @@ EN = {
     "失败": "FAIL",
     "数据目录可写": "Data folder writable",
     "配置读写": "Config read/write",
+    "API key 独立保存": "API key kept separately",
+    "加密后不含明文，存放在数据目录之外":
+        "encrypted, no plaintext on disk, stored outside the data folder",
     "系统中文字体": "System Chinese font",
     "英文词表已载入": "English dictionary loaded",
     "读取 PDF": "Read PDF",
