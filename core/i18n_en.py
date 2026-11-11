@@ -171,6 +171,14 @@ EN = {
     "全部完成，{n} 套图纸已生成：": "All done — {n} drawing set(s) generated:",
     "（没有可换算的数值，标注版与翻译版完全一样，未单独生成）":
         "    (nothing to convert; the marked copy would be identical, so it was skipped)",
+    "（输出单位选了「保持原样」，未生成标注版）":
+        "    (output units set to \"keep as is\", so no marked copy was produced)",
+    "（图像模式不生成标注版：原文文字是曲线，定位不到数值位置）":
+        "    (image mode does not produce a marked copy: the original text is curves, "
+        "so individual values cannot be located)",
+    "   图像模式不生成标注版：原文文字是曲线，定位不到每个数值的位置。":
+        "   Image mode does not produce a marked copy: the original text is drawn as "
+        "curves, so individual values cannot be located.",
     # 结尾的复核提醒。英文刻意说得更直白：把「能赔钱」这件事讲明白，
     # 比一句 "please review" 更有分量，也是这类工具该有的诚实。
     "⚠请逐处复核译文和单位换算后再使用：机器翻译和自动换算都可能出错，直接拿去做报价、下单或加工可能造成损失。":

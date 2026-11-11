@@ -2107,7 +2107,7 @@ class App(GlassWindow):
                     self.btn.set_enabled(True)
                     self.btn.set_text(T("开始转换"))
                     self.set_progress(0, 1)
-                    self._finish(payload)
+                    self._finish(*payload)
         except queue.Empty:
             pass
         self.win.after(80, self._poll_queue)
@@ -2158,6 +2158,10 @@ class App(GlassWindow):
     def _worker(self):
         outputs = []      # 各份的主交付物（翻译版），只用于记账归属
         folders = []      # 本轮生成的输出文件夹，完成时按文件夹展示
+        # 哪些文件夹没出标注版、以及为什么。三种原因给的说明完全不同：
+        # 用户选了保持原样、图纸本来就没有要换的数、图像模式定位不到数值。
+        # 混成一句「没有可换算的数值」，后两种情况下是错的。
+        mark_skip = {}
         mode = self.translator.unit_mode
         try:
             for idx, path in enumerate(self.files):
@@ -2279,10 +2283,21 @@ class App(GlassWindow):
                 elif mode == UNIT_KEEP:
                     self.msg_q.put(("log", (
                         T("   输出单位选了「保持原样」，未生成标注版。"), "dim")))
+                    mark_skip[folder] = "keep"
+                elif full_ocr:
+                    # 图像模式下确实可能换算了（选英制时 mm 会变 inch），
+                    # 但标黄要靠 PDF 的文字对象定位每个数字，转曲文件取不到
+                    # 任何词，一笔都标不上。这时说「没有可换算的数值」是错的，
+                    # 用户会以为图纸里的数字本就不用处理，回头对原图才发现对不上。
+                    self.msg_q.put(("log", (
+                        T("   图像模式不生成标注版：原文文字是曲线，"
+                          "定位不到每个数值的位置。"), "dim")))
+                    mark_skip[folder] = "image"
                 else:
                     self.msg_q.put(("log", (
                         T("   这份文件没有可换算的数值，未生成标注版（两版内容会完全一样）"),
                         "dim")))
+                    mark_skip[folder] = "none"
 
                 # ---- 预览图：渲染译文的首页，不打开 PDF 也能一眼看效果 ----
                 try:
@@ -2382,7 +2397,7 @@ class App(GlassWindow):
                       "配额按天重置。配好 AI 接口后就不再依赖它。"), "warn")))
             self.translator.save_cache()
             self.msg_q.put(("strip", None))
-            self.msg_q.put(("done", folders))
+            self.msg_q.put(("done", (folders, mark_skip)))
 
     def _plan_outputs(self, src):
         """
@@ -2426,14 +2441,24 @@ class App(GlassWindow):
             "check": os.path.join(folder, f"{T('【数据校验清单】')}{base}.txt"),
         }
 
-    def _finish(self, folders):
+    def _finish(self, folders, mark_skip=None):
         """
         收尾展示。folders 是本轮生成的输出文件夹列表。
 
         按文件夹展示而不是按文件平铺：一份图纸的五六个产出本来就是一整套，
         平铺成一串路径反而让人对不上号。每个文件夹下把实际生成的文件列出来，
         用户能当场看出这套是不是齐的（比如标注版没出，就知道这份图纸没换算）。
+
+        mark_skip: {文件夹: 原因}，记录哪些文件夹没出标注版以及为什么。
+        缺标注版要说明，否则用户看到少一项会怀疑是漏出了；但原因必须说对 ——
+        「图像模式定位不到数值」和「这份图纸没有要换的数」是两回事。
         """
+        mark_skip = mark_skip or {}
+        missing_note = {
+            "keep": T("（输出单位选了「保持原样」，未生成标注版）"),
+            "image": T("（图像模式不生成标注版：原文文字是曲线，定位不到数值位置）"),
+            "none": T("（没有可换算的数值，标注版与翻译版完全一样，未单独生成）"),
+        }
         if not folders:
             self._say("\n" + T("没有产出文件。可能是 PDF 里没有可翻译的文字。"), "warn")
             return
@@ -2446,11 +2471,10 @@ class App(GlassWindow):
                 names = []
             for fn in names:
                 self._say("    " + fn, "dim")
-            # 纯同单位的图纸不会有标注版（两份会一模一样）。这里要说一句，
-            # 否则用户看到少一项会怀疑是不是漏出了。
             if names and not any(n.startswith(T("【标注】")) for n in names):
-                self._say("    " + T("（没有可换算的数值，标注版与翻译版完全一样，未单独生成）"),
-                          "dim")
+                note = missing_note.get(mark_skip.get(d))
+                if note:
+                    self._say("    " + note, "dim")
         # 最后这条是免责提醒，必须留在用户视线里：机器翻译可能把术语译反，
         # 单位换算可能把公差取整，而用户拿到成品往往直接就用于报价、下单、
         # 加工。放在日志末尾而不是弹窗：弹窗会被顺手点掉，日志行留下来，
