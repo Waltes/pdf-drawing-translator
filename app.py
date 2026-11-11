@@ -267,6 +267,7 @@ except Exception:
 try:
     from core import pdf_engine
     from core import i18n
+    from core import image_text
     from core.i18n import T
     from core.llm_client import (PRESETS, generic_hint, is_local_url, key_guide,
                                  preset_for, preset_label)
@@ -2092,6 +2093,15 @@ class App(GlassWindow):
                     self.set_progress(*payload)
                 elif kind == "strip":
                     self.refresh_strip()
+                elif kind == "ask":
+                    # 工作线程要一个回答。弹窗必须在主线程做，结果用 Event 送回去
+                    title, question, ev, box = payload
+                    try:
+                        box["answer"] = messagebox.askyesno(title, question)
+                    except Exception:
+                        box["answer"] = False
+                    finally:
+                        ev.set()
                 elif kind == "done":
                     self.busy = False
                     self.btn.set_enabled(True)
@@ -2129,6 +2139,22 @@ class App(GlassWindow):
         self.translator.llm.usage.reset_session()
         threading.Thread(target=self._worker, daemon=True).start()
 
+    def _ask_main(self, title, question, timeout=300):
+        """
+        从工作线程请求主线程弹确认框，阻塞等用户点选。
+
+        为什么不能在工作线程里直接调 messagebox：Tk 不是线程安全的，
+        在非主线程弹窗会卡死或整窗无响应。只能走消息队列回到主线程，
+        再用 Event 把结果带回来。
+
+        超时按「否」处理：用户走开了不该把转换线程永远挂住。
+        """
+        ev = threading.Event()
+        box = {"answer": False}
+        self.msg_q.put(("ask", (title, question, ev, box)))
+        ev.wait(timeout)
+        return box["answer"]
+
     def _worker(self):
         outputs = []      # 各份的主交付物（翻译版），只用于记账归属
         folders = []      # 本轮生成的输出文件夹，完成时按文件夹展示
@@ -2146,6 +2172,35 @@ class App(GlassWindow):
                     self.msg_q.put(("log", (
                         T("   注意：这份文件几乎没有可选中的文字（疑似扫描件），"
                           "将只依赖位图 OCR，效果可能有限。"), "warn")))
+
+                # 文字已转成曲线：既没有文字层也没有位图，常规流程一条都翻不出来。
+                # 必须拦下来 —— 不拦的话会照常输出一份和原文几乎一样的「翻译版」，
+                # 用户以为成功了，实际一个字都没变（客户实际踩到过这个坑）。
+                full_ocr = False
+                if info["traced"]:
+                    self.msg_q.put(("log", (
+                        i18n.fmt("   这份 PDF 的文字已转成曲线（CAD 导出时勾了"
+                                 "「文字转曲」），提取不到可编辑文字，共 {c} 个字符。",
+                                 c=info["chars"]), "warn")))
+                    self.msg_q.put(("log", (
+                        T("   直接翻译不会有任何变化。要拿到干净译文，"
+                          "请让制图方重新导出带文字的 PDF。"), "warn")))
+                    if not image_text.HAS_OCR:
+                        self.msg_q.put(("log", (
+                            T("   已跳过。图像模式需要 OCR 组件，当前环境未安装。"),
+                            "warn")))
+                        continue
+                    if not self._ask_main(
+                            T("文字已转成曲线"),
+                            T("这份 PDF 的文字是图形，没有可编辑的文字层，"
+                              "常规翻译不会有任何变化。\n\n"
+                              "是否用图像模式尝试：整页识别，盖掉原文再写译文？\n"
+                              "效果有限：字号会被压缩，个别位置可能压到线框。\n\n"
+                              "更好的办法是让制图方重新导出带文字的 PDF。")):
+                        self.msg_q.put(("log", (T("   已跳过这份文件。"), "dim")))
+                        continue
+                    full_ocr = True
+
 
                 # ---- 输出文件夹：一份源文件一个文件夹，文件夹名就是原文件名 ----
                 plan = self._plan_outputs(path)
@@ -2191,13 +2246,22 @@ class App(GlassWindow):
                                        translate_batch=self.translator.translate_many,
                                        annotate_path=mark_path,
                                        unit_mode=mode,
-                                       render_preview=False)
-                self.msg_q.put(("log", (
-                    i18n.fmt("   完成：{a}/{b} 条已译 · 段落合并 {c} 处 · "
-                             "位图内文字 {d} 条",
-                             a=stats.get("translated", 0), b=stats.get("targets", 0),
-                             c=stats.get("paragraphs", 0),
-                             d=stats.get("image_texts", 0)), "ok")))
+                                       render_preview=False,
+                                       ocr_full_pages=full_ocr)
+                # 一条都没译出来时不能报「完成」：用户会以为成功了，
+                # 拿着跟原文一样的文件继续往下走，最后发给客户才发现。
+                if not stats.get("translated") and not stats.get("image_texts"):
+                    self.msg_q.put(("log", (
+                        T("   未发现可翻译的文字，这份文件没有生成有效译文。"),
+                        "warn")))
+                else:
+                    self.msg_q.put(("log", (
+                        i18n.fmt("   完成：{a}/{b} 条已译 · 段落合并 {c} 处 · "
+                                 "位图内文字 {d} 条",
+                                 a=stats.get("translated", 0),
+                                 b=stats.get("targets", 0),
+                                 c=stats.get("paragraphs", 0),
+                                 d=stats.get("image_texts", 0)), "ok")))
                 # 翻译版是主交付物，记账时用它做归属
                 outputs.append(out_path)
 
@@ -2498,6 +2562,35 @@ def _selftest():
         doc.save(src)
         doc.close()
         check(T("读取 PDF"), True, pymupdf.__doc__.split("\n")[0] if pymupdf.__doc__ else "")
+
+        # 转曲 PDF 的识别：CAD 导出时勾了「文字转曲」，文字被画成矢量路径，
+        # 既没有文字层也没有位图。认不出来的话程序会静默输出一份跟原文一样的
+        # 「翻译版」，用户以为翻译成功了（客户实际踩到过）。这里现造一份验证判据。
+        try:
+            from core import image_text
+            probe_pdf = os.path.join(tmp, "traced.pdf")
+            pd = pymupdf.open()
+            pg = pd.new_page()
+            # 画一堆线模拟矢量图纸的线框，一个字都不放
+            for i in range(40):
+                pg.draw_line((20 + i, 20), (200, 60 + i), color=(0, 0, 0), width=0.4)
+            pd.save(probe_pdf)
+            pd.close()
+            probe = pdf_engine.analyze_pdf(probe_pdf)
+            check(T("转曲 PDF 识别"), probe.get("traced") is True,
+                  f"paths={probe.get('paths')}")
+        except Exception as exc:
+            check(T("转曲 PDF 识别"), False, f"{type(exc).__name__}: {exc}")
+
+        # OCR 文字的语言判定：中文不能因为「没有拉丁字母」被当噪声扔掉，
+        # 纯数字（尺寸、零件序号）必须判成不翻，否则会被翻成英文单词
+        try:
+            check(T("OCR 文字语言判定"),
+                  image_text.ocr_lang("零件") == "zh"
+                  and image_text.ocr_lang("PART") == "en"
+                  and image_text.ocr_lang("38.10") == "none")
+        except Exception as exc:
+            check(T("OCR 文字语言判定"), False, f"{type(exc).__name__}: {exc}")
 
         dst = os.path.join(tmp, "out.pdf")
         stats = {}

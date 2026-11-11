@@ -702,15 +702,26 @@ def analyze_pdf(path):
     体检：判断这份 PDF 能不能处理。
     矢量图纸能提取到大量文字；扫描件/图片版几乎提取不到，
     提前告诉用户，省得他等半天拿到一份没变化的文件。
+
+    另外单独认一种情况：文字已转成曲线（traced）。
+    CAD 导出 PDF 时勾了「文字转曲」，中文被画成矢量路径，
+    结果既没有文字层、也没有位图对象，get_image_info() 是空的。
+    这类文件在原来那套判据里跟「正常但字很少的图纸」长得一样，
+    跑完一条都翻不出来、输出跟原文几乎一致，用户只会认为程序坏了。
     """
     doc = pymupdf.open(path)
     pages = len(doc)
     chars = 0
     images = 0
+    paths = 0            # 矢量路径总数：用来区分「转曲的文字」和「真的空白页」
     for page in doc:
         chars += len(re.sub(r"\s", "", page.get_text() or ""))
         try:
             images += len(page.get_images())
+        except Exception:
+            pass
+        try:
+            paths += len(page.get_drawings())
         except Exception:
             pass
     doc.close()
@@ -718,12 +729,18 @@ def analyze_pdf(path):
     per_page = chars / pages if pages else 0
     # 每页不到 20 个字符、又存在图片，基本可以断定是扫描件
     scan_like = pages > 0 and per_page < 20 and images > 0
-    return {"pages": pages, "chars": chars, "images": images, "scan_like": scan_like}
+    # 转曲：几乎没有可提取的文字、一张位图都没有，但页面上有大量矢量路径。
+    # 平均每页 20 条以上才判，纯边框的空页或封面不会被误判。
+    traced = (pages > 0 and per_page < 20 and images == 0
+              and paths / pages >= 20)
+    return {"pages": pages, "chars": chars, "images": images,
+            "paths": paths, "scan_like": scan_like, "traced": traced}
 
 
 def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
-                stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC):
+                stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC,
+                ocr_full_pages=False):
     """
     处理整份 PDF。
     translate_fn(text, lang) -> str      逐条翻译（兼容旧用法）
@@ -744,6 +761,12 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          任何一处按公制写死都会造出自相矛盾的文件。
                                          单位声明格用哪种文字不在这里传 ——
                                          按 translate_fn 的目标语言定，见 write_unit_decl。
+    ocr_full_pages                       把每页整页当位图做 OCR。
+                                         给「文字已转曲」的 PDF 用：这类文件
+                                         既没有文字层也没有位图对象，常规 OCR
+                                         一个区域都找不到，只能整页渲染后识别。
+                                         代价是慢（每页数秒）且覆盖原字时可能
+                                         压到穿过的线框，属于有损方案。
     """
     doc = pymupdf.open(src_path)
     total = len(doc)
@@ -939,7 +962,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             img_misses = []
             n_img = image_text.process_page_images(
                 page, translate_fn, used, all_report, translate_batch,
-                untranslated=img_misses)
+                untranslated=img_misses, force_full=ocr_full_pages)
             if n_img:
                 # 图片层的记录拿不到页码，这里补上
                 for i in range(len(all_report) - n_img, len(all_report)):

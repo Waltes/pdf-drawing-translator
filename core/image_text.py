@@ -48,6 +48,31 @@ MIN_CONTRAST = 34     # 文字与背景的最小亮度差，太接近说明识�
 _ocr_engine = None
 _font_cjk = None
 
+# OCR 结果的语言判定用。中文图纸的识别结果里一个拉丁字母都没有，
+# 原来那行「必须含 [A-Za-z]」的过滤会把它们全部当噪声扔掉 —— 中文转英文时
+# OCR 通道等于整个失效。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_KANA_RE = re.compile(r"[\u3040-\u30ff]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def ocr_lang(text):
+    """
+    判断一条 OCR 文字该按哪种源语言送进翻译器。只返回 zh / en / none。
+
+    判成 none 的（纯数字、纯单位、纯符号）不翻译：尺寸数字和零件序号
+    原样保留才对，翻成 "three hundred" 是灾难。
+
+    假名也并按 zh 处理：翻译器只认中英两种提示，判成 ja 会被当成
+    「认不出的语种」，结果是不翻，比按中文处理更糟。
+    """
+    text = text or ""
+    if _CJK_RE.search(text) or _KANA_RE.search(text):
+        return "zh"
+    if _LATIN_RE.search(text):
+        return "en"
+    return "none"
+
 
 def _get_ocr():
     global _ocr_engine
@@ -69,12 +94,20 @@ def _get_cjk_font():
     return _font_cjk
 
 
-def find_image_regions(page, min_area=8000):
+def find_image_regions(page, min_area=8000, force_full=False):
     """
     找出页面上的位图区域。
     面积太小的（图标、logo）跳过；其余全部处理，
     因为很多图纸会把「技术要求」整块贴成图片。
+
+    force_full: 把整页当成一个区域处理。给「文字已转成曲线」的 PDF 用 ——
+    这类文件（CAD 导出时勾了文字转曲）的文字全是矢量路径，
+    既没有文字层、也没有位图对象，get_image_info() 返回空。
+    常规流程一个区域都找不到，整页 OCR 是唯一还能碰到文字的路径。
     """
+    if force_full:
+        return [page.rect]
+
     regions = []
     try:
         for info in page.get_image_info():
@@ -135,6 +168,15 @@ def sample_colors(arr, rect, zoom, clip):
     bg = np.median(ring, axis=0)
     bg_std = float(np.std(ring, axis=0).mean())
 
+    # 离群像素占比：环带里有多少像素跟底色差得很远。
+    # 为什么需要这个：图纸上大量标注是「红色部分」「灰色部分」这种，
+    # 文字旁边紧挨着一块对应颜色的色块。环带必然采到那块颜色，
+    # 标准差直接爆表，原来只看 std 就把它们全判成「背景太花」放弃了 ——
+    # 实测一页 25 条标注因此有 16 条没翻，剩下的全是白底上的标题。
+    # 底色本身仍是干净的（中位数落在白），只要离群像素是少数就不该放弃。
+    dev = np.abs(ring.astype(int) - bg.astype(int)).sum(axis=1)
+    far_ratio = float((dev > 90).mean())
+
     # 文字：文字框内部，取离背景最远的那部分
     inner = arr[ty0:ty1, tx0:tx1].reshape(-1, 3) if (tx1 > tx0 and ty1 > ty0) else ring
     if len(inner) == 0:
@@ -145,7 +187,9 @@ def sample_colors(arr, rect, zoom, clip):
     fg = np.median(far if len(far) else inner, axis=0)
 
     contrast = float(abs(float(bg.mean()) - float(fg.mean())))
-    if bg_std > MAX_BG_STD or contrast < MIN_CONTRAST:
+    # 标准差超标「且」离群像素占多数，才说明真的压在花纹上；
+    # 只是边上蹭到色块的放行，否则图上一半标注永远翻不了。
+    if (bg_std > MAX_BG_STD and far_ratio > 0.45) or contrast < MIN_CONTRAST:
         return None
     return bg, fg, bg_std
 
@@ -204,7 +248,8 @@ def fix_ocr_spacing(text):
 
 
 def process_page_images(page, translate_fn, used_rects, report,
-                        translate_batch=None, untranslated=None):
+                        translate_batch=None, untranslated=None,
+                        force_full=False):
     """
     处理一页里位图上的文字。
 
@@ -212,6 +257,7 @@ def process_page_images(page, translate_fn, used_rects, report,
     report:          收集改写记录，格式与文字层一致
     translate_batch: 批量翻译函数，传了就把本页所有图片文字打包一次翻完
     untranslated:    收集翻不出来的条目，用于最终如实汇报覆盖率
+    force_full:      整页当作一个位图区域处理（文字已转曲的 PDF 走这条路）
 
     返回改写条数
     """
@@ -220,7 +266,7 @@ def process_page_images(page, translate_fn, used_rects, report,
             untranslated.append(("图片内文字", "未安装 OCR 组件，位图里的文字未处理"))
         return 0
 
-    regions = find_image_regions(page)
+    regions = find_image_regions(page, force_full=force_full)
     if not regions:
         return 0
 
@@ -258,8 +304,11 @@ def process_page_images(page, translate_fn, used_rects, report,
                 continue
 
             text = fix_ocr_spacing(clean_ocr_text(raw_text))
-            # 纯数字/编号（零件序号）不翻译，它们只是指代
-            if not text or not re.search(r"[A-Za-z]", text) or len(text) < 2:
+            # 纯数字/编号（零件序号、尺寸数字）不翻译，它们只是指代。
+            # 这里按 ocr_lang 判，不再要求「必须含拉丁字母」：中文图纸的识别结果
+            # 一个字母都没有，按字母判会把整页中文全当噪声扔掉。
+            hint = ocr_lang(text)
+            if not text or hint == "none" or len(text) < 2:
                 continue
 
             xs = [p[0] for p in box]
@@ -286,54 +335,86 @@ def process_page_images(page, translate_fn, used_rects, report,
                 continue
 
             bg, fg, _std = sampled
-            candidates.append({"text": text, "rect": txt_rect, "bg": bg, "fg": fg})
+            candidates.append({"text": text, "rect": txt_rect, "bg": bg,
+                               "fg": fg, "hint": hint})
 
     if not candidates:
         return 0
 
     # 批量翻译（图片文字少但页多，逐条串行会把总时间拖长一倍）
+    # 源的语种用每条自己的 hint，不再硬编码 "en"：中文图纸的标注传 en 进去，
+    # 翻译器会判成「原文已是英文」直接原样返回，等于白跑一趟 OCR。
     if translate_batch:
         try:
-            outs = translate_batch([(c["text"], "en") for c in candidates])
+            outs = translate_batch([(c["text"], c["hint"]) for c in candidates])
         except Exception:
-            outs = [translate_fn(c["text"], "en") for c in candidates]
+            outs = [translate_fn(c["text"], c["hint"]) for c in candidates]
     else:
         outs = []
         for c in candidates:
             try:
-                outs.append(translate_fn(c["text"], "en"))
+                outs.append(translate_fn(c["text"], c["hint"]))
             except Exception:
                 outs.append("")
 
-    font = _get_cjk_font()
-    changed = 0
-    for c, zh in zip(candidates, outs):
-        if not zh or not zh.strip() or zh.strip().upper() == c["text"].upper():
+    # 字体按译文语种选：中文用系统中文字体，英文用内置拉丁字体
+    # （拉丁字形更接近图纸原有标注，嵌入体积也小）
+    font_cjk = _get_cjk_font()
+    font_latin = pymupdf.Font("helv")
+
+    # 分两轮写：先把所有原文统一盖掉，再统一写译文。
+    # 一轮一条地处理会互相打架 —— 相邻两行只隔一个多字高，后一条的填充
+    # 必然压到前一条刚写好的英文上，实测底部那几行长句就是这么整行糊掉的。
+    plans = []
+    for c, out in zip(candidates, outs):
+        if not out or not out.strip() or out.strip().upper() == c["text"].upper():
             if untranslated is not None:
                 untranslated.append(("图片内文字", c["text"]))
             continue
-        zh = zh.strip()
+        out = out.strip()
+        font = font_cjk if _CJK_RE.search(out) else font_latin
 
         r = c["rect"]
-        bg, fg = c["bg"], c["fg"]
-        # 填充范围比文字框略外扩，确保原文字被盖干净（外扩量按字高比例，小字不会被吃掉笔画）
-        pad = max(min(r.height * 0.10, 0.8), 0.35)
-        fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
-        # 用采样出来的背景色填充，而不是盖白色——才不会留下刺眼的方块
-        page.draw_rect(fill, color=None, fill=tuple(float(v) / 255 for v in bg), width=0)
-
-        # 写中文：字号对齐原文字高度，放不下再缩；颜色沿用原文字色
         h = r.height
-        size = h
-        width = font.text_length(zh, fontsize=size)
-        maxw = (r.width + h * 0.6) - 1
+        # 横向余量压到 0.2 字高。原先是 0.6，英文长句伸出原框，
+        # 伸出去那段下面还压着原文没被盖住，就成了叠影。
+        # 但也不能把填充框跟着译文拉宽 —— 试过，个别 OCR 框一宽，
+        # 整块图纸被涂白（左侧立柱和尺寸线被盖掉），比叠影更糟。
+        # 折中：框不动，让译文缩字号写进框里。
+        maxw = r.width + h * 0.2
+        # 纵向外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
+        # 分两轮写之后，外扩大一点也不会吃掉相邻行的译文了。
+        pad = max(min(h * 0.32, 2.0), 0.6)
+        fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
+        # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
+        # 宁可留下原文记进未译清单，也不能把图形涂掉
+        if fill.width * fill.height > r.width * r.height * 3.5 + 40:
+            if untranslated is not None:
+                untranslated.append(("图片内文字", c["text"]))
+            continue
+
+        # 字号对齐原文字高度，放不下再缩；颜色沿用原文字色。
+        # 英文标注普遍比中文窄也比中文矮，用同一个字号会显得偏小，
+        # 乘 1.08 补一点观感；上限仍受文字框宽度约束
+        size = h * (1.0 if _CJK_RE.search(out) else 1.08)
+        width = font.text_length(out, fontsize=size)
         if width > maxw > 0:
             size = size * maxw / width
-        tw = pymupdf.TextWriter(page.rect)
-        tw.append(pymupdf.Point(r.x0, r.y1), zh, font=font, fontsize=size)
-        tw.write_text(page, color=tuple(float(v) / 255 for v in fg))
+        plans.append((c, out, fill, size, font))
 
-        report.append((None, c["text"], zh, False))
+    # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
+    for c, _out, fill, _size, _font in plans:
+        page.draw_rect(fill, color=None,
+                       fill=tuple(float(v) / 255 for v in c["bg"]), width=0)
+
+    # 第二轮：写译文
+    changed = 0
+    for c, out, _fill, size, font in plans:
+        tw = pymupdf.TextWriter(page.rect)
+        tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
+                  font=font, fontsize=size)
+        tw.write_text(page, color=tuple(float(v) / 255 for v in c["fg"]))
+        report.append((None, c["text"], out, False))
         changed += 1
 
     return changed

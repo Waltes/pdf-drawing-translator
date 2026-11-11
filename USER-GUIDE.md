@@ -656,6 +656,7 @@ than repainted, and listed as untranslated.
 
 | Case | Explanation |
 |---|---|
+| Text converted to outlines | some CAD exports draw text as graphics, so the file contains no editable text. The program detects this and skips the file by default instead of writing a translation identical to the original. Image mode recognises each page and writes over the original, but font sizes get compressed and some labels may cover drawing lines. The clean fix is a PDF re-exported with text kept as text |
 | Fully scanned drawings | no text layer, OCR only, limited accuracy; flagged when the run starts |
 | Small text over dense artwork | not repainted, kept as original and listed as untranslated |
 | Chinese longer than English | the font shrinks to fit, down to a floor, never past legibility |

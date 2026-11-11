@@ -402,4 +402,31 @@ EN = {
     "请求超时。可以换一个更快的服务商，或减少单次翻译条数。":
         "The request timed out. Try a faster provider, or send fewer items per batch.",
     "请求失败：{name} {msg}": "Request failed: {name} {msg}",
+
+    # ---------------- 文字已转曲线（CAD 导出） ----------------
+    "   这份 PDF 的文字已转成曲线（CAD 导出时勾了「文字转曲」），提取不到可编辑文字，共 {c} 个字符。":
+        "   The text in this PDF has been converted to outlines (a CAD export "
+        "option), so no editable text can be extracted: {c} characters.",
+    "   直接翻译不会有任何变化。要拿到干净译文，请让制图方重新导出带文字的 PDF。":
+        "   Translating it will change nothing. For a clean result, ask whoever "
+        "produced the drawing to re-export the PDF with text kept as text.",
+    "   已跳过。图像模式需要 OCR 组件，当前环境未安装。":
+        "   Skipped. Image mode needs the OCR component, which is not installed.",
+    "   已跳过这份文件。": "   Skipped this file.",
+    "   未发现可翻译的文字，这份文件没有生成有效译文。":
+        "   No translatable text was found. No usable translation was produced.",
+    "文字已转成曲线": "Text converted to outlines",
+    "转曲 PDF 识别": "Detect outlined PDF",
+    "OCR 文字语言判定": "OCR text language detection",
+    "这份 PDF 的文字是图形，没有可编辑的文字层，常规翻译不会有任何变化。\n\n"
+    "是否用图像模式尝试：整页识别，盖掉原文再写译文？\n"
+    "效果有限：字号会被压缩，个别位置可能压到线框。\n\n"
+    "更好的办法是让制图方重新导出带文字的 PDF。":
+        "The text in this PDF is drawn as graphics: there is no editable text "
+        "layer, so a normal translation changes nothing.\n\n"
+        "Try image mode? Each page is recognised, the original is covered, then "
+        "the translation is written in.\n"
+        "Results are limited: font sizes get compressed and some labels may "
+        "cover drawing lines.\n\n"
+        "The better option is to ask for a PDF re-exported with text as text.",
 }

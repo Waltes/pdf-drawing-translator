@@ -261,6 +261,13 @@ part:
 
 ## Known limitations
 
+- PDFs whose text has been converted to outlines cannot be translated directly. Some CAD
+  exports draw the text as graphics, leaving neither a text layer nor any bitmap. The
+  program detects this, says so, and skips the file by default rather than producing a
+  translation identical to the original. Choosing image mode recognises each page and
+  writes over the original, at the cost of compressed font sizes and labels that may cover
+  drawing lines. A clean result requires the drawing to be re-exported with text kept as
+  text.
 - Selectable text only. Scanned or image-only drawings have no text layer. With
   `rapidocr-onnxruntime` installed the bitmaps are recognised, at lower accuracy than real
   text.
