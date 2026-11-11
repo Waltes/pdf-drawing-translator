@@ -997,6 +997,13 @@ def _restore_api_key(cfg, saved):
         return False
 
     llm["api_key"] = backup
+    # 只补 key 不够，开关也得一起补。
+    # cfg 这个时候是 default_config()，enabled 是默认的 False；而 available()
+    # 看的是 cfg.get("enabled", True)，键存在且为 False 就直接判定不可用。
+    # 后果是 key 明明回到了输入框里，一翻译却抛「AI 接口未配置完整：缺少参数」
+    # ——key 和模型都不缺，用户完全看不懂（这个路径实测踩到过）。
+    # 走恢复就说明配置文件已经丢了，不存在「用户自己关掉的」这种可能，直接开。
+    llm["enabled"] = True
     try:
         save_config(cfg)            # 写回配置，下次启动就走正常路径了
     except Exception:

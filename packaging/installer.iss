@@ -21,15 +21,17 @@
 ;     卸载完直接删掉用户的术语库和缓存，是很多人骂软件的原因。
 ;
 ;  4) 双语向导，默认跟随系统语言
-;     中文语言文件是本目录下的 ChineseSimplified.isl —— Inno 官方不带简体中文，
-;     里面只写了向导上真正会看到的那几句，没写的自动落回英文 Default.isl。
-;     不引第三方整份翻译，是因为那种文件几百条，官方升级一次就可能对不上，
-;     到时候界面上蹦出半句没翻的话反而更难看。
+;     中文语言文件是本目录下的 ChineseSimplified.isl。Inno 官方不带简体中文，
+;     这里拿官方 6.5 的简体中文翻译（official_zh_6.5.isl）打底，再用本项目的
+;     说法覆盖（zh_overrides.isl），由 merge_zh_isl.py 生成。
+;     早先只写了几十条自定义消息，没写的会自动落回英文，结果向导中英混杂 ——
+;     标准消息有两百多条，漏一条就是一句英文冒出来，所以改成整份官方翻译打底。
+;     重新生成：python packaging/merge_zh_isl.py
 ; ============================================================================
 
 #define AppName "PDF 图纸翻译"
 #define AppNameEn "PDF Drawing Translator"
-#define AppVer "1.0.3"
+#define AppVer "1.0.4"
 #define AppExe "PDF图纸翻译.exe"
 #define AppPublisher "Walter"
 
