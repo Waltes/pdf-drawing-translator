@@ -137,7 +137,8 @@ begin
       ForceDirectories(ExtractFileDir(Bak));
       // 第三个参数 False = 已存在就覆盖。备份要跟着最新配置走，
       // 留住第一次的那份只会在装了几轮之后还原出一个很旧的设置。
-      FileCopy(Src, Bak, False);
+      // 用 CopyFile 不用 FileCopy：后者是 Inno 5 的名字，6.x 会出改名提示。
+      CopyFile(Src, Bak, False);
     end;
   end;
 end;
