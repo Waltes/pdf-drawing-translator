@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.6
+Version 1.0.7
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.6.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.7.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -422,7 +422,45 @@ Text coverage: 150 to translate, 114 translated (5 from bitmaps), 36 untranslate
 - Reasons for missing items include busy backgrounds that were not repainted, sentences
   that failed the checks, and OCR failures on scans. See section 11.
 
-### 5.5 Review reminder
+### 5.5 Review before the file is written
+
+After the translations are written back and before the file is saved, the whole document is
+checked once more. **If the check fails, no file is produced.** The log then lists every
+problem with its page number.
+
+Four things are checked:
+
+| Check | What it looks for | What you get if it is skipped |
+|---|---|---|
+| Read-back | Are the written characters actually legible at that spot | A blank patch where text used to be |
+| Leftovers | A whole line still in the source language | Your customer sees a foreign sentence |
+| Coverage | Nothing at all was replaced | You ship the original file by accident |
+| Semantic spot-check | Items that were converted or whose numbers changed, re-checked by the model | Numbers right, meaning wrong |
+
+The spot-check covers only suspicious items, not every line, so it does not noticeably add
+to the run time or the cost.
+
+A failed run looks like this:
+
+```
+Review failed: 2 items still in the source language
+
+Blocked before writing, no file was produced:
+  Page 2 · leftover: 2根5毫米厚镀锌铁板2.79米长  — this line was not translated
+  Page 4 · leftover: 2根5毫米厚镀锌铁板2.79米长  — this line was not translated
+
+  No file was produced. Fix the items above and run again.
+```
+
+The usual fix is to shorten that piece of text in the original drawing, or write it in a form
+that can be recognised, then run again. The program would rather produce nothing than hand
+over a drawing with a leftover sentence or a blank patch.
+
+A second, non-blocking category — reference notes — appears in the log without stopping the
+run. Example: the number of units in a line does not match. That check counts unit symbols,
+and correct translations are often flagged by it, so it informs but does not block.
+
+### 5.6 Review reminder
 
 Every run ends with an orange reminder at the bottom of the log:
 
@@ -738,7 +776,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.6.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.7.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

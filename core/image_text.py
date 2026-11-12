@@ -284,7 +284,7 @@ def fix_ocr_spacing(text):
 
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
-                        force_full=False):
+                        force_full=False, write_marks=None):
     """
     处理一页里位图上的文字。
 
@@ -293,6 +293,10 @@ def process_page_images(page, translate_fn, used_rects, report,
     translate_batch: 批量翻译函数，传了就把本页所有图片文字打包一次翻完
     untranslated:    收集翻不出来的条目，用于最终如实汇报覆盖率
     force_full:      整页当作一个位图区域处理（文字已转曲的 PDF 走这条路）
+    write_marks:     写入记录 [(页码, Rect, 期望文本)]。页码这里没有，留 None，
+                     由 pdf_engine 补 —— 和 report 的处理方式一致。
+                     这份记录是输出前复核唯一的「擦掉的地方有没有写回字」凭据：
+                     背景色盖上去就撤不回来了，只能事后回读。
 
     返回改写条数
     """
@@ -496,6 +500,8 @@ def process_page_images(page, translate_fn, used_rects, report,
                       font=font, fontsize=size)
             tw.write_text(page, color=color)
         report.append((None, c["text"], out, False))
+        if write_marks is not None:
+            write_marks.append((None, c["rect"], out))
         changed += 1
 
     return changed

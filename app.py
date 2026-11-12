@@ -2252,7 +2252,23 @@ class App(GlassWindow):
                                        annotate_path=mark_path,
                                        unit_mode=mode,
                                        render_preview=False,
-                                       ocr_full_pages=full_ocr)
+                                       ocr_full_pages=full_ocr,
+                                       # 复核判「残留」和做语义抽查都要用到，
+                                       # 显式传，别让引擎去猜 —— 猜错时
+                                       # 残留检查会静默失效，等于这次复核白跑
+                                       dst_lang=self.translator.dst_lang,
+                                       reviewer=self.translator)
+                # 复核没过：引擎根本不会落盘，这里不能报「完成」，
+                # 也不能把它记进产出清单 —— 否则用户以为拿到文件了，
+                # 去文件夹一看是空的，比直接说清楚更糟。
+                review = stats.get("review")
+                if stats.get("blocked"):
+                    if review is not None:
+                        for line in review.lines():
+                            self.msg_q.put(("log", (line, "warn")))
+                    self.msg_q.put(("log", (
+                        T("   这份文件没有生成。处理上述问题后重跑即可。"), "err")))
+                    continue
                 # 一条都没译出来时不能报「完成」：用户会以为成功了，
                 # 拿着跟原文一样的文件继续往下走，最后发给客户才发现。
                 if not stats.get("translated") and not stats.get("image_texts"):
@@ -2267,6 +2283,12 @@ class App(GlassWindow):
                                  b=stats.get("targets", 0),
                                  c=stats.get("paragraphs", 0),
                                  d=stats.get("image_texts", 0)), "ok")))
+                # 复核结果要单独交代一句：用户得能确认「这份是核过才出的」，
+                # 而不是又要自己翻一遍文件去找空白块
+                if review is not None:
+                    self.msg_q.put(("log", ("   " + review.summary(), "ok")))
+                    if review.ai_checked == 0 and review.ai_note:
+                        self.msg_q.put(("log", ("   " + review.ai_note, "dim")))
                 # 翻译版是主交付物，记账时用它做归属
                 outputs.append(out_path)
 
@@ -2692,10 +2714,13 @@ def _selftest():
 
         dst = os.path.join(tmp, "out.pdf")
         stats = {}
+        # verify=False：这份是自检现造的样例，只用来考换算出来的数值。
+        # 它上面的文字本来就不按图纸规范写，交给复核会判成「原文未处理」——
+        # 那是样例的问题，不是产品的问题。复核本身另有专门一项在下面。
         pdf_engine.process_pdf(src, dst, None, render_preview=False,
                                translate_batch=tr.translate_many,
                                scan_images=False, stats_out=stats,
-                               unit_mode="metric")
+                               unit_mode="metric", verify=False)
 
         d2 = pymupdf.open(dst)
         text = d2[0].get_text()
@@ -2707,6 +2732,30 @@ def _selftest():
                            ("11.34kg", "25 lb → 11.34kg")):
             check(f"{T('换算')} {note}", want in text)
 
+        # 输出前复核：写完的字能不能读回来、没翻的那一句能不能判成残留。
+        # 这两个判据是整道复核的基础 —— 它们错了，要么把好文件拦下来，
+        # 要么把带中文的文件放过去，两种都比没有复核更糟。
+        try:
+            from core import review as _rv
+            _d = pymupdf.open()
+            _pg = _d.new_page(width=320, height=200)
+            _pg.insert_text((60, 60), "FLANGE 5.00mm", fontsize=11)
+            _box = pymupdf.Rect(58, 48, 210, 68)
+            _pass = _rv.review_document(_d, [(1, _box, "FLANGE 5.00mm")], "en")
+            _blank = _rv.review_document(_d, [(1, _box, "NEVER WRITTEN")], "en")
+            _d.close()
+            # 一句话没译，在英文产出里必须算残留；数字碎片不能算
+            _leftover = _rv._is_leftover("2根5毫米厚镀锌铁板2.79米长", "en")
+            _fragment = _rv._is_leftover("3mm", "en")
+            check(T("输出前复核"),
+                  (not _pass.blocking) and _blank.blocking
+                  and _leftover and not _fragment,
+                  f"读回={'正常' if not _pass.blocking else '异常'} · "
+                  f"空白{'能识别' if _blank.blocking else '漏判'} · "
+                  f"残留{'能识别' if _leftover else '漏判'}")
+        except Exception as exc:
+            check(T("输出前复核"), False, f"{type(exc).__name__}: {exc}")
+
         # 反方向：公制 → 英制。这是新增的输出单位，主链路里最容易接线漏掉的一环
         # （换算通了但单位声明没改、标注版标错单位，都属于这里能抓到的问题）
         tr2 = Translator(dict(cfg, translate={"src": "auto", "dst": "auto",
@@ -2716,7 +2765,7 @@ def _selftest():
         pdf_engine.process_pdf(src, dst2, None, render_preview=False,
                                translate_batch=tr2.translate_many,
                                scan_images=False, stats_out=stats2,
-                               unit_mode="imperial")
+                               unit_mode="imperial", verify=False)
         d3 = pymupdf.open(dst2)
         text2 = d3[0].get_text()
         d3.close()
@@ -2747,7 +2796,7 @@ def _selftest():
         pdf_engine.process_pdf(src_mm, dst3, None, render_preview=False,
                                translate_batch=tr3.translate_many,
                                scan_images=False, stats_out=stats3,
-                               unit_mode="imperial")
+                               unit_mode="imperial", verify=False)
         d4 = pymupdf.open(dst3)
         text3 = d4[0].get_text()
         d4.close()

@@ -19,6 +19,7 @@ import pymupdf
 from . import image_text
 from . import i18n
 from . import paragraph as paragraph_mod
+from . import review as review_mod
 # 单位换算的判定要和翻译层用同一套规则，不能各写一份：
 # 「这条原文里有没有会被换算的量」直接问翻译层要答案，
 # 否则这边改了那边没改，会出现「单位声明改了、数值却没换算」的错位。
@@ -740,7 +741,8 @@ def analyze_pdf(path):
 def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
                 stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC,
-                ocr_full_pages=False):
+                ocr_full_pages=False, verify=True, dst_lang=None,
+                reviewer=None):
     """
     处理整份 PDF。
     translate_fn(text, lang) -> str      逐条翻译（兼容旧用法）
@@ -767,12 +769,28 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          一个区域都找不到，只能整页渲染后识别。
                                          代价是慢（每页数秒）且覆盖原字时可能
                                          压到穿过的线框，属于有损方案。
+    verify                               落盘前整份复核（core/review.py）。
+                                         不过关就不生成文件，问题清单回填到
+                                         stats_out["review"]，stats_out["blocked"]
+                                         置真。默认开 —— 生成一份带中文残留或
+                                         空白块的文件，比不出文件更糟。
+    dst_lang                             产出的目标语言，复核判「残留」要用。
+                                         不传就从 reviewer / 批量方法的绑定实例上猜，
+                                         猜不到会退回界面语言 —— 那会让残留检查
+                                         整个失效（界面是中文、产出是英文时，
+                                         页面上所有汉字都不会被判成残留）。
+                                         所以调用方**应当显式传**。
+    reviewer                             翻译器实例，语义抽查要用。同 dst_lang，
+                                         显式传最稳，别指望从 translate_batch 上反推。
     """
     doc = pymupdf.open(src_path)
     total = len(doc)
     all_report = []
     stat = {"targets": 0, "translated": 0, "untranslated": [], "image_texts": 0,
             "paragraphs": 0, "unit_decl_fixed": 0, "metric_marks": 0}
+    # 写入记录 [(页码, Rect, 期望文本)]，供输出前的复核回读校验。
+    # 擦除是不可逆的，只有写完再读回来才能证明「这里没有被擦成空白」。
+    marks = []
 
     # 整篇先扫一遍有没有会换算的量。
     # 有才改单位声明栏 —— 没有换算却把「英寸」改成「毫米」，
@@ -785,9 +803,10 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
     # 那时 translate_fn 是 None，语种得从批量接口的绑定对象上取
     # （translate_many 是 Translator 的绑定方法，__self__ 就是那个实例）。
     # 都取不到就退回界面语言 —— 自检里就是这种情况，和改造前的行为一致。
-    hint_obj = translate_fn if translate_fn is not None else \
-        getattr(translate_batch, "__self__", None)
-    dst_hint = getattr(hint_obj, "dst_lang", "") or ""
+    hint_obj = reviewer if reviewer is not None else (
+        translate_fn if translate_fn is not None else
+        getattr(translate_batch, "__self__", None))
+    dst_hint = dst_lang or getattr(hint_obj, "dst_lang", "") or ""
     if dst_hint == "auto":
         # 目标选「自动」＝翻成系统语言，跟 Translator._resolve 用同一口径，
         # 否则会出现「文字翻了、单位声明格还写着另一种语言」的错位
@@ -940,11 +959,18 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 for p, txt in para_entries:
                     all_report.append((page_no + 1,) + write_paragraph(page, p, txt))
                     stat["translated"] += 1
+                    # 整段占的是一组行，取并集当作回读区域
+                    pr = pymupdf.Rect(p[0].rect)
+                    for ln in p[1:]:
+                        pr |= ln.rect
+                    marks.append((page_no + 1, pr, txt))
 
                 if single_entries:
                     page_report = write_groups(page, single_entries)
                     all_report.extend((page_no + 1,) + r for r in page_report)
                     stat["translated"] += len(page_report)
+                    marks.extend((page_no + 1, g.rect, txt)
+                                 for g, txt in single_entries)
 
                 for g, src in decl_entries:
                     all_report.append((page_no + 1,) +
@@ -962,18 +988,57 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             img_misses = []
             n_img = image_text.process_page_images(
                 page, translate_fn, used, all_report, translate_batch,
-                untranslated=img_misses, force_full=ocr_full_pages)
+                untranslated=img_misses, force_full=ocr_full_pages,
+                write_marks=marks)
             if n_img:
                 # 图片层的记录拿不到页码，这里补上
                 for i in range(len(all_report) - n_img, len(all_report)):
                     if all_report[i][0] is None:
                         all_report[i] = (page_no + 1,) + all_report[i][1:]
+                # 写入记录同样是本页新加的那几条，页码一并补上
+                for i in range(len(marks) - n_img, len(marks)):
+                    if marks[i][0] is None:
+                        marks[i] = (page_no + 1,) + marks[i][1:]
                 stat["image_texts"] += n_img
                 if progress:
                     progress(page_no + 1, total,
                              f"第 {page_no + 1}/{total} 页：替换图内标注 {n_img} 处")
             for item in img_misses:
                 stat["untranslated"].append((page_no + 1, item[1]))
+
+    # ---------- 输出前复核 ----------
+    # 位置很关键：必须在落盘之前。
+    # 一份带着中文残留或空白块的图纸交到客户手里，比这次没出文件糟得多 ——
+    # 后者当场就能看见，前者要等客户发现。
+    if verify:
+        warn_issues, notice_issues = [], []
+        ledger = getattr(hint_obj, "metric_report", None)
+        for item in (getattr(ledger, "issues", None) or []):
+            try:
+                level, pno, s_txt, o_txt, detail = item
+            except (TypeError, ValueError):
+                continue
+            text = f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"
+            # 只有确凿的疑点才拦：warn 是「译文数值与复算值不符」
+            # 「原文数值在译文里找不到」这类。notice 是按单位个数数出来的，
+            # 正确译文也常被判不等（见 MetricReport 的说明），只当提示。
+            if level == "warn":
+                warn_issues.append(text)
+            elif level == "notice":
+                notice_issues.append(text)
+        review = review_mod.review_document(
+            doc, marks, dst_hint or i18n.get_lang(),
+            untranslated=stat["untranslated"],
+            metric_issues=warn_issues,
+            metric_notes=notice_issues,
+            translator=hint_obj if hint_obj is not None else None)
+        stat["review"] = review
+        if review.blocking:
+            stat["blocked"] = True
+            doc.close()     # 内存里已经改好的内容直接丢弃，不落盘
+            if stats_out is not None:
+                stats_out.update(stat)
+            return all_report
 
     # 子集化字体，只保留实际用到的字形，避免文件体积暴涨
     try:

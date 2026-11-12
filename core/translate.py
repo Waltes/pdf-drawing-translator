@@ -788,10 +788,15 @@ class MetricReport:
     """
     一份 PDF 的计量数据校验账本。
 
-    分三类记，因为用户要做的事不一样：
+    分四类记，因为用户要做的事不一样：
       checked —— 一共验了多少条（说明这套校验跑过了）
       fixed   —— 程序自己改正的（算错数、漏换算、小数位不对），用户不用管
-      warned  —— 程序不敢动、要人看一眼的（数量对不上、单位对不上）
+      noticed —— 启发式提示（同一句里单位个数对不上）。这类误报不少：
+                 原文「50*100*3mm」只抽出 1 个值、译文「50.00×100.00×3.00mm」
+                 抽出 2 个，就会被记成「数量对不上」。所以它只做参考，
+                 不拿来拦文件生成 —— 真拿它当闸门，正确译文也被卡住。
+      warned  —— 确凿的疑点（译文数值与复算值不符、原文数值在译文里找不到），
+                 这类要人看一眼，也够格拦下发版
     """
 
     LIMIT = 400         # 明细上限，防止畸形 PDF 把内存吃满
@@ -803,11 +808,14 @@ class MetricReport:
         self.checked = 0
         self.fixed = 0
         self.warned = 0
+        self.noticed = 0
         self.issues = []        # [(level, page, src, out, detail)]
 
     def add(self, level, page, src, out, detail):
         if level == "fix":
             self.fixed += 1
+        elif level == "notice":
+            self.noticed += 1
         else:
             self.warned += 1
         if len(self.issues) < self.LIMIT:
@@ -822,6 +830,8 @@ class MetricReport:
             s += i18n.fmt(" · 自动纠正 {n} 处", n=self.fixed)
         if self.warned:
             s += i18n.fmt(" · 需人工确认 {n} 处", n=self.warned)
+        if self.noticed:
+            s += i18n.fmt(" · 参考提示 {n} 处", n=self.noticed)
         if not self.fixed and not self.warned:
             s += i18n.T(" · 全部一致")
         return s
@@ -914,8 +924,12 @@ def verify_metric_output(src, out, dst="zh", page=None, report=None,
         # 注意：数量不等这件事本身就要报，不能只在「误差超限」时才报。
         # 译文把两个尺寸合并成一个（3-3/4" x 1-1/2" → 95.25mm）时，
         # 剩下的那个值往往是准的，误差检查会全部通过，静默放行就漏了。
+        #
+        # 记成 notice 而不是 warn：这个「个数」是按「数值紧跟单位」抽出来的，
+        # 原文「50*100*3mm」只数到 1 个，译文「50.00×100.00×3.00mm」数到 2 个，
+        # 明明都对却被判数量不等。误报太多，不能拿它拦文件。
         if len(exp_g) != len(act_g):
-            note("warn", i18n.fmt(
+            note("notice", i18n.fmt(
                 "本句{kind}数量对不上（原文 {a} 处 / 译文 {b} 处），"
                 "可能有数值被漏算或合并，需人工核对",
                 kind=_kind_cn(kind), a=len(exp_g), b=len(act_g)))
@@ -1133,6 +1147,8 @@ class Translator:
         self.metric_report = MetricReport()
         # 当前正在处理的页码，由 pdf_engine 每页写一次，只用于给校验清单标页码
         self.page_no = None
+        # 输出前语义抽查的候选条目 [(页码, 原文, 译文)]，见 _review_worthy
+        self._review_list = []
         # 方向与输出单位。三项都存在 cfg["translate"] 里，界面改完调 set_direction
         self._load_direction()
 
@@ -2079,6 +2095,9 @@ class Translator:
                 mode=self.unit_mode)
             if new != out:
                 results[i] = new
+            # 记下可疑条目，供输出前复核做语义抽查（见 _review_worthy）
+            if self._review_worthy(raw, new):
+                self._review_list.append((self.page_no, raw, new))
         # 单独记一个计数，不塞进 self.stats —— 那个字典的键是固定五个，
         # 界面上要按键取数，多一个键会让统计行读不到数
         self.metric_converted = getattr(self, "metric_converted", 0) + converted
@@ -2098,6 +2117,111 @@ class Translator:
         self.last_llm_error = ""
         self.last_llm_reject = ""
         self._reject_stats = {}
+        # 语义抽查的候选也一起清，理由同上
+        self._review_list = []
+
+    # ---------------- 输出前复核 ----------------
+
+    @staticmethod
+    def _numset(text):
+        """
+        文本里出现过的数值集合，归一化到浮点。
+        「3.00」和「3」算同一个，不然格式化补的小数位会把每条都判成可疑。
+        """
+        out = set()
+        for s in NUM_RE.findall(text or ""):
+            try:
+                out.add(round(float(s), 4))
+            except ValueError:
+                continue
+        return out
+
+    def _review_worthy(self, src, out):
+        """
+        这条译文值不值得再让模型核一眼。
+
+        不做全量复查 —— 那等于把翻译成本翻倍，而绝大多数条目本来就没事。
+        只挑两类真正会伤到图纸的：
+
+          · 数字集合变了：原文 2.79、译文 2790，多半是换了单位表达。
+            这类最容易「数字看着都在、规格已经变了」，v1.0.6 修的正是
+            同一批数据，只是那次错在把正确的换算当成了算错。
+          · 原文标了单位、译文一个公制单位都不剩：单位被吃掉了，
+            车间照着下料就是错件。
+
+        长度比例不参与判定：中英互译的字数天然差两三倍，拿比例筛会把
+        整批正常条目都算成可疑，抽查成本就失控了。
+        """
+        if not src or not out:
+            return False
+        a, b = self._numset(src), self._numset(out)
+        if a and b and a != b:
+            return True
+        if _NUM_UNIT_RE.search(src) and not _NUM_UNIT_OUT_RE.search(out):
+            return True
+        return False
+
+    def review_candidates(self, limit=30):
+        """返回待语义抽查的条目，按 (原文, 译文) 去重，最多 limit 条"""
+        seen, out = set(), []
+        for (pno, src, tgt) in getattr(self, "_review_list", []):
+            key = (src, tgt)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((pno, src, tgt))
+            if len(out) >= limit:
+                break
+        return out
+
+    def review_pairs(self, pairs):
+        """
+        把「原文 → 译文」配对交给模型核一遍，只返回有问题的条目。
+
+        提示词刻意限定在数字、单位、规格、漏译这四项上。让它顺嘴评价语气和
+        用词，会把注意力从真正该看的东西上引开 —— 这一层是拿去兜底的，
+        不是审校文案。
+        """
+        if not pairs:
+            return []
+        payload = [{"id": i, "source": s, "translation": t}
+                   for i, (_p, s, t) in enumerate(pairs)]
+        if i18n.is_en():
+            ask = ("You are checking machine translations on an engineering drawing. "
+                   "For each item, compare the translation against the source and report "
+                   "ONLY these problems: a wrong or missing number, a wrong or missing "
+                   "unit, a changed specification, or content that was dropped. "
+                   "Do not comment on style or wording. "
+                   "Reply with a JSON array covering the BAD items only: "
+                   "[{\"id\": 0, \"problem\": \"...\"}]. If none are wrong, reply [].")
+        else:
+            ask = ("你在核对工程图纸上的机器翻译。逐条比较原文和译文，只报告这几类问题："
+                   "数字错了或丢了、单位错了或丢了、规格被改动、内容被漏掉。"
+                   "不要评论用词和语气。"
+                   "只把有问题的条目按 JSON 数组返回：[{\"id\": 0, \"problem\": \"...\"}]。"
+                   "全部没问题就返回 []。")
+        messages = [{"role": "system", "content": ask},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+        content, _usage = self.llm.chat(
+            messages, max_tokens=min(2048, 120 * len(pairs) + 200))
+        m = re.search(r"\[.*\]", content or "", re.S)
+        if not m:
+            return []
+        try:
+            arr = json.loads(m.group())
+        except Exception:
+            return []
+        out = []
+        for it in arr if isinstance(arr, list) else []:
+            if not isinstance(it, dict):
+                continue
+            i = it.get("id")
+            if not isinstance(i, int) or not (0 <= i < len(pairs)):
+                continue
+            pno, src, _tgt = pairs[i]
+            out.append({"page": pno or 0, "text": src,
+                        "problem": str(it.get("problem") or "").strip()})
+        return out
 
     def _cache_get(self, key, src, dst, text):
         """
