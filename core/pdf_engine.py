@@ -738,6 +738,266 @@ def analyze_pdf(path):
             "paths": paths, "scan_like": scan_like, "traced": traced}
 
 
+# ---------------------------------------------------------------------------
+# 复核打回后的定向重译
+# ---------------------------------------------------------------------------
+# 复核最多跑几轮。3 轮 = 初次复核 + 两次重译后的复审。
+# 定 3 而不是「一直重试到全过」：图纸上确实有改不动的东西（印章、水印、
+# 局部框窄到放不下一个字），无限重试只会持续烧接口额度而始终不出文件。
+_MAX_REVIEW_ROUNDS = 3
+
+
+def _metric_items(hint_obj):
+    """
+    把换算账本拆成「确凿疑点」和「启发式提示」两组，供复核使用。
+
+    确凿的（warn）要带上页码和原文：复核要靠这两样把问题配对到
+    「能重写这一条」的登记记录上，配上了才能打回重译。
+    """
+    warn, notice, seen = [], [], set()
+    ledger = getattr(hint_obj, "metric_report", None)
+    for item in (getattr(ledger, "issues", None) or []):
+        try:
+            level, pno, s_txt, o_txt, detail = item
+        except (TypeError, ValueError):
+            continue
+        if level == "warn":
+            # 同一条被反复校验（每轮重译都会重算）时会重复入账，
+            # 只留最后一次 —— 前几次的复算结果已经被后来的覆盖了
+            key = (pno, re.sub(r"\s+", "", s_txt or ""))
+            if key in seen:
+                warn = [w for w in warn if w["_k"] != key]
+            seen.add(key)
+            warn.append({"_k": key, "page": pno, "src": s_txt,
+                         "text": f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"})
+        elif level == "notice":
+            text = f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"
+            if text not in notice:
+                notice.append(text)
+    for w in warn:
+        w.pop("_k", None)
+    return warn, notice
+
+
+def _rewrite_record(doc, rec, new_text):
+    """
+    把一条打回的记录在原位重写一遍，成功返回 True。
+
+    三条写入路径各自沿用原来的函数，不另写一套排版：
+    文字层单个标注走 write_groups，整段说明走 write_paragraph，
+    位图里的字走 image_text.rewrite_one。
+
+    重写前一律先擦。擦除是幂等的 —— 同一块再擦一次只是把上一版写的
+    译文也擦掉，不擦的话新旧两版字会叠在一起，看着比空白更糟。
+    """
+    try:
+        page = doc[rec["page"] - 1]
+    except (IndexError, TypeError, KeyError):
+        return False
+    obj = rec.get("obj")
+    if obj is None:
+        return False
+    try:
+        if rec.get("kind") == "image":
+            return image_text.rewrite_one(page, obj, new_text)
+        if rec.get("kind") == "para":
+            erase_text(page, obj)
+            write_paragraph(page, obj, new_text)
+            return True
+        erase_text(page, [obj])
+        write_groups(page, [(obj, new_text)])
+        return True
+    except Exception:
+        return False
+
+
+def _payload_rect(payload):
+    """
+    一处待译内容的覆盖范围。
+
+    单个标注就是个 TextGroup，直接取 rect；整段说明是一组行，取并集 ——
+    重译之后复核要拿这个范围去回读「字到底写上了没有」，
+    给错了就会把写好的判成空白，或者把邻行的字当成自己的。
+    """
+    rect = getattr(payload, "rect", None)
+    if rect is not None:
+        return rect
+    try:
+        union = pymupdf.Rect(payload[0].rect)
+        for ln in payload[1:]:
+            union |= ln.rect
+        return union
+    except Exception:
+        return None
+
+
+def _retry_feedback(rec, issue, round_no):
+    """
+    给模型的「这条为什么要重做」说明。
+
+    这段话决定了重写有没有意义：只说「再翻一次」，模型给回来的往往还是
+    原来那句，第二轮第三轮就纯属空转。所以必须把具体问题说清楚
+    （数值对不上、原框太窄写不下、上次直接退了原文），并说明这一轮的约束。
+    """
+    if issue.kind == "number":
+        msg = (f"这一条的数值与原文复算不符：{issue.detail}。"
+               f"请按原文重新翻译，数值必须与原文换算结果一致。")
+    elif issue.kind == "ai":
+        msg = (f"这一条上一次的译文被判为「{issue.detail}」。"
+               f"请按原文重新翻译，数字、单位、规格不得改动，也不得漏内容。")
+    elif issue.kind == "blank":
+        msg = ("这一条上一次的译文没能写进图上的原位置（原框太窄，"
+               "或者字号已缩到不可读）。请给出更短的译文，"
+               "优先使用标准缩写和符号，不要展开成完整句子。")
+    else:
+        msg = ("这一条上一次没有译出（返回了原文，或与原文完全相同）。"
+               "请务必译成目标语言，数字和单位按原文保留。")
+    if round_no >= 2:
+        msg += "注意：上一轮按同样要求重译后仍不合格，这次必须换一种表达。"
+    return msg
+
+
+def _retry_batch(doc, targets, retranslate, round_no, marks):
+    """
+    执行一轮定向重译：只重翻被复核打回的那几条，返回真正写成多少条。
+
+    写成后要把「回读校验的期望文本」一起换掉（rec["mark"]["out"]），
+    否则下一轮复核还拿着旧译文去页面上找，永远判空白 —— 这是重试
+    最容易踩的坑：明明写好了，报告里还是一片空白块。
+    """
+    items = []
+    for rec, issue in targets:
+        src = rec.get("src") or ""
+        items.append((src, rec.get("lang") or detect_lang(src),
+                      _retry_feedback(rec, issue, round_no)))
+    try:
+        outs = retranslate(items)
+    except Exception:
+        return 0
+    if not outs:
+        return 0
+
+    written = 0
+    for (rec, _issue), new in zip(targets, outs):
+        if not new or not str(new).strip():
+            continue
+        new = str(new).strip()
+        if new == (rec.get("out") or "").strip():
+            # 模型给了与上一版一字不差的译文，再重试也是同一句，别浪费轮次
+            continue
+        if not _rewrite_record(doc, rec, new):
+            continue
+        rec["out"] = new
+        mark = rec.get("mark")
+        if mark is not None:
+            mark["out"] = new
+        else:
+            marks.append({"page": rec.get("page"), "rect": rec.get("rect"),
+                          "out": new, "src": rec.get("src")})
+            rec["mark"] = marks[-1]
+        written += 1
+    return written
+
+
+def _prune_untranslated(stat, fixes):
+    """
+    重译写成之后，把对应条目从未译清单里划掉。
+
+    不划掉的话，下一轮复核还按「这条没译出来」报残留，
+    于是又被打回一次、又翻一遍 —— 白烧两轮额度才收敛。
+    """
+    done = set()
+    for rec in fixes:
+        if rec.get("out"):
+            done.add(review_mod.fix_key(rec.get("page"), rec.get("src")))
+    if not done:
+        return
+    stat["untranslated"] = [
+        (p, t) for (p, t) in stat.get("untranslated", [])
+        if review_mod.fix_key(p, t) not in done]
+
+
+def _review_with_retries(doc, marks, stat, fixes, hint_obj, dst_hint,
+                         progress=None):
+    """
+    复核 → 不过就打回重译 → 再复核，直到通过、改不动、或轮次用尽。
+
+    返回 (review, blocked)。blocked 为真时调用方不能落盘。
+
+    这里体现的是 v1.0.8 的流程：检测 → 翻译 → 复核 →（有错）定向重译
+    → 复核 → 出图。复核不再是一个「过 / 不过」的闸门，而是流程中间的一环。
+    """
+    # 登记表：{（页码, 去空白原文）: [记录]}。复核就是靠它判断
+    # 「这条问题有没有可擦写的框」，有框才谈得上打回重写。
+    fixmap = {}
+    for rec in fixes:
+        if not rec.get("page"):
+            continue
+        # 纯尺寸标注是本地换算出来的，没有「翻译」可重做。
+        # 数值复算不符说明换算规则本身有问题，重试只会得到同一个数，
+        # 所以不入表 —— 这类问题直接进阻断，让人对照原图核。
+        if rec.get("kind") == "size":
+            continue
+        fixmap.setdefault(review_mod.fix_key(rec["page"], rec.get("src")),
+                          []).append(rec)
+
+    retranslate = getattr(hint_obj, "retranslate", None)
+    history, retried, round_no, rep = [], 0, 0, None
+
+    while True:
+        round_no += 1
+        warn_items, notice_items = _metric_items(hint_obj)
+        rep = review_mod.review_document(
+            doc, marks, dst_hint or i18n.get_lang(),
+            untranslated=stat.get("untranslated"),
+            metric_issues=warn_items,
+            metric_notes=notice_items,
+            translator=hint_obj, fixmap=fixmap,
+            round_no=round_no, retried=retried)
+
+        if not rep.blocking:
+            history.append(f"第 {round_no} 轮：通过")
+            break
+
+        targets = rep.retry_targets()
+        history.append(f"第 {round_no} 轮：{len(rep.issues)} 处问题"
+                       + (f"，可重译 {len(targets)} 处" if targets
+                          else "，无法自动修复"))
+
+        # 三条停手条件，缺一条就会无限循环烧额度
+        if not targets:
+            break                      # 剩下的全是改不动的（印章水印 / 整页无译文）
+        if round_no >= _MAX_REVIEW_ROUNDS:
+            history[-1] += "（已达轮次上限）"
+            break                      # 轮次用尽
+        if retranslate is None:
+            history[-1] += "（翻译器不支持定向重译）"
+            break
+
+        got = _retry_batch(doc, targets, retranslate, round_no, marks)
+        history[-1] += f"，写成 {got} 处"
+        if progress:
+            # 复核这段不推进页码进度条，但必须把消息吐出去 ——
+            # 一次重译要调模型，界面静默几十秒会让人以为卡死了
+            progress(0, 0, f"第 {round_no} 轮复核打回 {len(targets)} 处，"
+                           f"重译写成 {got} 处")
+        if got == 0:
+            break                      # 一条都没写成，再来一轮还是这样
+        retried += got
+        _prune_untranslated(stat, fixes)
+
+    rep.history = history
+    rep.round = round_no
+    rep.retried = retried
+
+    # 收尾判：还有「可修却没修好」或「本身就不是翻译问题」的，一律拦下。
+    # 只剩「定位不到框」的那批时放行 —— 印章、水印这类技术上没法原位替换，
+    # 一直拦着等于让人永远出不了图；清单照给，由用户决定用不用。
+    blocked = rep.blocking
+    stat["tolerated"] = [it.line().strip() for it in rep.tolerable]
+    return rep, blocked
+
+
 def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
                 stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC,
@@ -769,10 +1029,18 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          一个区域都找不到，只能整页渲染后识别。
                                          代价是慢（每页数秒）且覆盖原字时可能
                                          压到穿过的线框，属于有损方案。
-    verify                               落盘前整份复核（core/review.py）。
-                                         不过关就不生成文件，问题清单回填到
+    verify                               落盘前整份复核（core/review.py），
+                                         不过关就打回定向重译，重译后复审。
+                                         最多 _MAX_REVIEW_ROUNDS 轮；三轮回
+                                         仍不过才不出文件。问题清单回填到
                                          stats_out["review"]，stats_out["blocked"]
-                                         置真。默认开 —— 生成一份带中文残留或
+                                         置真。
+                                         只剩「定位不到可擦写框」的残留
+                                         （印章、水印、图形边缘的字）时不阻断，
+                                         清单进 stats_out["tolerated"]，
+                                         文件照常生成 —— 这类技术上没法原位
+                                         替换，拦着只会让人永远出不了图。
+                                         默认开 —— 生成一份带中文残留或
                                          空白块的文件，比不出文件更糟。
     dst_lang                             产出的目标语言，复核判「残留」要用。
                                          不传就从 reviewer / 批量方法的绑定实例上猜，
@@ -788,9 +1056,13 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
     all_report = []
     stat = {"targets": 0, "translated": 0, "untranslated": [], "image_texts": 0,
             "paragraphs": 0, "unit_decl_fixed": 0, "metric_marks": 0}
-    # 写入记录 [(页码, Rect, 期望文本)]，供输出前的复核回读校验。
+    # 写入记录 [{page, rect, out, src}]，供输出前的复核回读校验。
     # 擦除是不可逆的，只有写完再读回来才能证明「这里没有被擦成空白」。
     marks = []
+    # 复核打回后能重写这一条的登记记录（v1.0.8）。
+    # 每写一处就记一条：哪一页、什么类型的写入、原位对象、原文、这次写的译文。
+    # 复核发现某处不对时，靠它把问题配回具体位置，才能定向重译而不是整份重跑。
+    fixes = []
 
     # 整篇先扫一遍有没有会换算的量。
     # 有才改单位声明栏 —— 没有换算却把「英寸」改成「毫米」，
@@ -897,7 +1169,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 new_texts.append(next(it) if u[0] != "size" else u[2])
 
             para_entries, single_entries, decl_entries, stale_entries = [], [], [], []
-            for (kind, payload, text, _lang), new_text in zip(units, new_texts):
+            for (kind, payload, text, lang), new_text in zip(units, new_texts):
                 if not text:
                     continue
 
@@ -937,40 +1209,65 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 # 译文必须非空且确实变了，否则不处理，防止把原文搞丢
                 if new_text and new_text.strip() and new_text.strip() != text:
                     if kind == "para":
-                        para_entries.append((payload, new_text.strip()))
+                        para_entries.append((payload, new_text.strip(), text, lang))
                     else:
-                        single_entries.append((payload, new_text.strip()))
+                        # 单个标注带上 kind：size 是本地换算出来的纯尺寸，
+                        # 后面登记重译时要把它排除掉（见下方写入循环）
+                        single_entries.append((payload, new_text.strip(),
+                                               text, lang, kind))
                 else:
                     # 没翻出来的记进清单，最后如实告诉用户漏了哪些
                     stat["untranslated"].append((page_no + 1, text))
+                    # 这类正是复核会判「原文未处理」的对象。原文还在页面上、
+                    # 框也还在手上，所以照样登记：重译拿到新译文后能直接写进去。
+                    if kind != "size":
+                        fixes.append({"page": page_no + 1, "kind": kind,
+                                      "obj": payload, "src": text,
+                                      "rect": _payload_rect(payload),
+                                      "out": None, "lang": lang, "mark": None})
 
             if para_entries or single_entries or decl_entries or stale_entries:
                 # 先擦后写，顺序不能反
                 to_erase = []
-                for p, _ in para_entries:
+                for p, _t, _s, _l in para_entries:
                     to_erase.extend(p)
-                for g, _ in single_entries:
+                for g, _t, _s, _l, _k in single_entries:
                     to_erase.append(g)
                 for g, _ in decl_entries:
                     to_erase.append(g)
                 to_erase.extend(stale_entries)
                 erase_text(page, to_erase)
 
-                for p, txt in para_entries:
+                for p, txt, src, lang in para_entries:
                     all_report.append((page_no + 1,) + write_paragraph(page, p, txt))
                     stat["translated"] += 1
                     # 整段占的是一组行，取并集当作回读区域
                     pr = pymupdf.Rect(p[0].rect)
                     for ln in p[1:]:
                         pr |= ln.rect
-                    marks.append((page_no + 1, pr, txt))
+                    mark = {"page": page_no + 1, "rect": pr,
+                            "out": txt, "src": src}
+                    marks.append(mark)
+                    fixes.append({"page": page_no + 1, "kind": "para", "obj": p,
+                                  "src": src, "rect": pr, "out": txt,
+                                  "lang": lang, "mark": mark})
 
                 if single_entries:
-                    page_report = write_groups(page, single_entries)
+                    page_report = write_groups(
+                        page, [(g, txt) for g, txt, _s, _l, _k in single_entries])
                     all_report.extend((page_no + 1,) + r for r in page_report)
                     stat["translated"] += len(page_report)
-                    marks.extend((page_no + 1, g.rect, txt)
-                                 for g, txt in single_entries)
+                    for g, txt, src, lang, k in single_entries:
+                        mark = {"page": page_no + 1, "rect": g.rect,
+                                "out": txt, "src": src}
+                        marks.append(mark)
+                        # 纯尺寸标注不登记重译：那条译文是本地按原文换算出来的，
+                        # 复算不符说明换算规则本身有问题，重翻只会得到同一个数。
+                        if k == "size":
+                            continue
+                        fixes.append({"page": page_no + 1, "kind": "single",
+                                      "obj": g, "src": src, "rect": g.rect,
+                                      "out": txt, "lang": lang, "mark": mark})
 
                 for g, src in decl_entries:
                     all_report.append((page_no + 1,) +
@@ -986,19 +1283,26 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
         if scan_images:
             used = [g.rect for g in groups]
             img_misses = []
+            n_rep, n_mark, n_fix = len(all_report), len(marks), len(fixes)
             n_img = image_text.process_page_images(
                 page, translate_fn, used, all_report, translate_batch,
                 untranslated=img_misses, force_full=ocr_full_pages,
-                write_marks=marks)
+                write_marks=marks, fixes=fixes)
+            # 图片层不知道自己处理的是第几页，这里统一补页码
+            for i in range(n_rep, len(all_report)):
+                if all_report[i][0] is None:
+                    all_report[i] = (page_no + 1,) + all_report[i][1:]
+            for i in range(n_mark, len(marks)):
+                if marks[i].get("page") is None:
+                    marks[i]["page"] = page_no + 1
+            for i in range(n_fix, len(fixes)):
+                rec = fixes[i]
+                if rec.get("page") is None:
+                    rec["page"] = page_no + 1
+                # 登记记录和回读记录是同一处的两个视角，页码要一起补
+                if rec.get("mark") is not None and rec["mark"].get("page") is None:
+                    rec["mark"]["page"] = page_no + 1
             if n_img:
-                # 图片层的记录拿不到页码，这里补上
-                for i in range(len(all_report) - n_img, len(all_report)):
-                    if all_report[i][0] is None:
-                        all_report[i] = (page_no + 1,) + all_report[i][1:]
-                # 写入记录同样是本页新加的那几条，页码一并补上
-                for i in range(len(marks) - n_img, len(marks)):
-                    if marks[i][0] is None:
-                        marks[i] = (page_no + 1,) + marks[i][1:]
                 stat["image_texts"] += n_img
                 if progress:
                     progress(page_no + 1, total,
@@ -1006,34 +1310,15 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             for item in img_misses:
                 stat["untranslated"].append((page_no + 1, item[1]))
 
-    # ---------- 输出前复核 ----------
+    # ---------- 输出前复核（含打回重译） ----------
     # 位置很关键：必须在落盘之前。
     # 一份带着中文残留或空白块的图纸交到客户手里，比这次没出文件糟得多 ——
     # 后者当场就能看见，前者要等客户发现。
     if verify:
-        warn_issues, notice_issues = [], []
-        ledger = getattr(hint_obj, "metric_report", None)
-        for item in (getattr(ledger, "issues", None) or []):
-            try:
-                level, pno, s_txt, o_txt, detail = item
-            except (TypeError, ValueError):
-                continue
-            text = f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"
-            # 只有确凿的疑点才拦：warn 是「译文数值与复算值不符」
-            # 「原文数值在译文里找不到」这类。notice 是按单位个数数出来的，
-            # 正确译文也常被判不等（见 MetricReport 的说明），只当提示。
-            if level == "warn":
-                warn_issues.append(text)
-            elif level == "notice":
-                notice_issues.append(text)
-        review = review_mod.review_document(
-            doc, marks, dst_hint or i18n.get_lang(),
-            untranslated=stat["untranslated"],
-            metric_issues=warn_issues,
-            metric_notes=notice_issues,
-            translator=hint_obj if hint_obj is not None else None)
+        review, blocked = _review_with_retries(
+            doc, marks, stat, fixes, hint_obj, dst_hint, progress=progress)
         stat["review"] = review
-        if review.blocking:
+        if blocked:
             stat["blocked"] = True
             doc.close()     # 内存里已经改好的内容直接丢弃，不落盘
             if stats_out is not None:

@@ -2119,6 +2119,8 @@ class Translator:
         self._reject_stats = {}
         # 语义抽查的候选也一起清，理由同上
         self._review_list = []
+        # 复核打回后重译了多少条，每份文件重新计数
+        self.retranslated = 0
 
     # ---------------- 输出前复核 ----------------
 
@@ -2221,6 +2223,96 @@ class Translator:
             pno, src, _tgt = pairs[i]
             out.append({"page": pno or 0, "text": src,
                         "problem": str(it.get("problem") or "").strip()})
+        return out
+
+    def retranslate(self, items, chunk=12):
+        """
+        定向重译：复核打回的那几条，带上「为什么不行」再翻一遍。
+
+        items: [(原文, 语言提示, 反馈说明), ...]
+        返回与 items 等长的列表，没翻成的位置为 None。
+
+        为什么不用 translate_many 而是直连模型：
+          1. 那条路第一步就查缓存，而打回的条目在缓存里正躺着上一版
+             不合格的译文，直接就返回了 —— 等于没重做。这是最容易
+             写出来的一个死循环。
+          2. 词典/在线通道只会逐词替换，改不动「数值算错」「太长写不下」
+             这两类问题，只能靠模型重写。
+        所以这里绕开所有通道，把问题原样告诉模型，只要一次结果。
+
+        拿到的译文仍要走和主流程一样的四道关（非空、方向、语言纯净、
+        数字保真）外加换算复算，过不了就当没翻出来 —— 重译不能成为
+        绕过质检的后门。
+        """
+        out = [None] * len(items)
+        if not items or not self.llm.available():
+            return out
+
+        for start in range(0, len(items), chunk):
+            part = list(range(start, min(start + chunk, len(items))))
+            payload, dsts = [], []
+            for k, i in enumerate(part):
+                src_text, hint, why = items[i]
+                _s, dst = self._resolve(hint)
+                dsts.append(dst or "")
+                payload.append({"id": k, "text": src_text,
+                                "target": i18n.prompt_name(dst),
+                                "problem": why})
+
+            if i18n.is_en():
+                extra = ("\n\nSome items were rejected in an earlier pass. Each carries a "
+                         "\"problem\" field explaining what was wrong. Fix exactly that "
+                         "problem and return a new translation. Keep every number and unit "
+                         "faithful to the source.")
+            else:
+                extra = ("\n\n下面有些条目是上一轮被退回的，每条带一个 problem 字段说明"
+                         "哪里不对。请针对那个问题重译，数字和单位必须与原文一致。")
+            messages = [{"role": "system", "content": self._system_prompt() + extra},
+                        {"role": "user",
+                         "content": json.dumps(payload, ensure_ascii=False)}]
+            try:
+                content, _usage = self.llm.chat(
+                    messages, max_tokens=min(8192, 256 + 160 * len(part)))
+            except Exception as e:
+                self.last_llm_error = str(e)
+                self.llm.usage.note_failure()
+                continue
+            got = self._parse_llm_json(content, len(part))
+            if not got:
+                continue
+
+            for k, i in enumerate(part):
+                val = got[k]
+                src_text, hint, _why = items[i]
+                dst = dsts[k]
+                if not val or not dst:
+                    continue
+                val = val.strip()
+                if not self._valid_translation(src_text, val, dst):
+                    self.stats["failed"] += 1
+                    continue
+                # 换算与复算：和 translate_many 出口同一套。
+                # 模型重译时最容易在「上一版数值被判错」这条上再错一次，
+                # 所以复算结果直接覆盖，不采信它自己算的数。
+                if self.unit_mode == UNIT_METRIC:
+                    if has_imperial(val):
+                        val = convert_to_metric(val)
+                    val = normalize_metric_format(val)
+                elif self.unit_mode == UNIT_IMPERIAL:
+                    if has_metric(val):
+                        val = convert_to_imperial(val)
+                val, _issues = verify_metric_output(
+                    src_text, val, dst=dst, page=self.page_no,
+                    report=self.metric_report, mode=self.unit_mode)
+                out[i] = val
+                self.stats["llm"] += 1
+                self.retranslated = getattr(self, "retranslated", 0) + 1
+                # 用新的覆盖缓存里的旧译文：否则下一份文件还会拿到
+                # 那条被判不合格的结果，等于每次都要重走一遍重译。
+                src_lang, _d = self._resolve(hint)
+                if src_lang and dst:
+                    self.cache[f"{src_lang}>{dst}::{src_text}"] = val
+
         return out
 
     def _cache_get(self, key, src, dst, text):

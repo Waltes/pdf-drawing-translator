@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.7
+Version 1.0.8
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.7.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.8.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -422,28 +422,81 @@ Text coverage: 150 to translate, 114 translated (5 from bitmaps), 36 untranslate
 - Reasons for missing items include busy backgrounds that were not repainted, sentences
   that failed the checks, and OCR failures on scans. See section 11.
 
-### 5.5 Review before the file is written
+### 5.5 Review before the file is written, and automatic retranslation
 
 After the translations are written back and before the file is saved, the whole document is
-checked once more. **If the check fails, no file is produced.** The log then lists every
-problem with its page number.
+checked once more. The full flow is:
 
-Four things are checked:
+```
+detect → translate → review ─┬─ pass ─────────────────→ output
+                             └─ problems → retranslate → review → …
+                                              ↑__ up to 3 rounds __|
+                      still failing after 3 rounds → no file, report only
+```
+
+**A failed review does not simply give up — the offending items are sent back for
+retranslation**, and the document is reviewed again afterwards.
+
+Five things are checked:
 
 | Check | What it looks for | What you get if it is skipped |
 |---|---|---|
 | Read-back | Are the written characters actually legible at that spot | A blank patch where text used to be |
 | Leftovers | A whole line still in the source language | Your customer sees a foreign sentence |
 | Coverage | Nothing at all was replaced | You ship the original file by accident |
+| Number re-check | Do converted values match a fresh calculation from the source | Wrong dimensions, wrongly cut parts |
 | Semantic spot-check | Items that were converted or whose numbers changed, re-checked by the model | Numbers right, meaning wrong |
 
 The spot-check covers only suspicious items, not every line, so it does not noticeably add
 to the run time or the cost.
 
-A failed run looks like this:
+#### Only the failing items are retranslated
+
+Not the whole document. Rerunning everything means paying the model for lines that were
+already right, doubling both time and cost. Instead each rejected item is sent back
+**together with the reason it failed**:
+
+| Problem | What the model is told | What it should change |
+|---|---|---|
+| Not translated | last attempt returned the source text | translate it, keep numbers and units |
+| Wrong number | the value a fresh calculation gives | follow the source, do not alter the dimension |
+| Does not fit | the box is too narrow, the text would shrink to unreadable | give a shorter rendering, use standard abbreviations |
+| Semantically suspect | what the spot-check objected to | translate from the source, drop nothing |
+
+From round 2 onward the request adds "the previous attempt with the same instruction still
+failed, so change the wording". This stops the model from returning the same sentence forever.
+
+The limit is 3 rounds (the first review plus two reviews after retranslation). At that point
+the program stops rather than keep spending API budget.
+
+#### Stamps and watermarks are reported but allowed through
+
+Drawings often contain content that cannot be translated: stamps, watermarks, text inside the
+title block. The rule for telling them apart is a single one — **can it be located as an
+erasable text box?**
+
+- Located: treated as an error, sent back for retranslation.
+- Not located: treated as untranslatable content. It cannot be replaced in place, so
+  **the file is still produced** and the items are listed separately in the log for you to
+  accept.
+
+Blocking on those would mean a drawing with a stamp could never be produced at all. So they
+inform but do not block:
 
 ```
-Review failed: 2 items still in the source language
+Review passed: 40 writes verified · 5 pages of text layer · 2 semantic checks · 2 items could not be located
+Review rounds: round 1: 3 problems, 3 retranslatable, 3 written → round 2: passed
+
+The following were left in place as untranslatable content (stamps, watermarks, text inside graphics):
+  Page 1 · leftover: 公司图签  — still in the source language (no replaceable text box found)
+  Use the file as is if these are expected; if any of them should be translated, fix the source and rerun.
+```
+
+#### When it genuinely cannot be fixed
+
+```
+Review result: round 3 failed: 2 items still in the source language
+Review rounds: round 1: 3 problems, 3 retranslatable, 3 written → round 2: 2 problems, 2 retranslatable, 0 written
 
 Blocked before writing, no file was produced:
   Page 2 · leftover: 2根5毫米厚镀锌铁板2.79米长  — this line was not translated
@@ -776,7 +829,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.7.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.8.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

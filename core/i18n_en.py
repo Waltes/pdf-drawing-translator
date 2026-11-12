@@ -324,6 +324,9 @@ EN = {
     "加密后不含明文，存放在数据目录之外":
         "encrypted, no plaintext on disk, stored outside the data folder",
     "系统中文字体": "System Chinese font",
+    "输出前复核": "Pre-output review",
+    "复核打回重译": "Review reject → retranslate",
+    "不可译内容放行": "Untranslatable content allowed",
     "英文词表已载入": "English dictionary loaded",
     "读取 PDF": "Read PDF",
     "换算": "convert",
@@ -427,6 +430,9 @@ EN = {
     "   已跳过这份文件。": "   Skipped this file.",
     "   未发现可翻译的文字，这份文件没有生成有效译文。":
         "   No translatable text was found. No usable translation was produced.",
+    "   这份文件没有生成。处理上述问题后重跑即可。":
+        "   No file was produced. Fix the issues above and run again.",
+    " · 参考提示 {n} 处": " · {n} reference notes",
     "文字已转成曲线": "Text converted to outlines",
     "转曲 PDF 识别": "Detect outlined PDF",
     "OCR 文字语言判定": "OCR text language detection",

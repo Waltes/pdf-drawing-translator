@@ -284,7 +284,7 @@ def fix_ocr_spacing(text):
 
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
-                        force_full=False, write_marks=None):
+                        force_full=False, write_marks=None, fixes=None):
     """
     处理一页里位图上的文字。
 
@@ -293,10 +293,13 @@ def process_page_images(page, translate_fn, used_rects, report,
     translate_batch: 批量翻译函数，传了就把本页所有图片文字打包一次翻完
     untranslated:    收集翻不出来的条目，用于最终如实汇报覆盖率
     force_full:      整页当作一个位图区域处理（文字已转曲的 PDF 走这条路）
-    write_marks:     写入记录 [(页码, Rect, 期望文本)]。页码这里没有，留 None，
-                     由 pdf_engine 补 —— 和 report 的处理方式一致。
+    write_marks:     写入记录。页码这里没有，留 None，由 pdf_engine 补 ——
+                     和 report 的处理方式一致。
                      这份记录是输出前复核唯一的「擦掉的地方有没有写回字」凭据：
                      背景色盖上去就撤不回来了，只能事后回读。
+    fixes:           复核打回后能重写这一条的登记记录（v1.0.8）。
+                     每个候选都记，含框、背景色、字色、原文；
+                     没写成的也记，重译拿到更短的译文后可以再写一次。
 
     返回改写条数
     """
@@ -412,69 +415,122 @@ def process_page_images(page, translate_fn, used_rects, report,
     font_cjk = _get_cjk_font()
     font_latin = pymupdf.Font("helv")
 
-    # 分两轮写：先把所有原文统一盖掉，再统一写译文。
-    # 一轮一条地处理会互相打架 —— 相邻两行只隔一个多字高，后一条的填充
-    # 必然压到前一条刚写好的英文上，实测底部那几行长句就是这么整行糊掉的。
+    # v1.0.8：把「每条怎么排」和「怎么落到页面上」拆成两个模块函数。
+    # 目的是让复核打回的那几条能在原位重写一遍 —— 重写要走的正是同一套
+    # 排版与盖字逻辑，复制一份出来迟早会两边不一致。
     plans = []
     for c, out in zip(candidates, outs):
-        if not out or not out.strip() or out.strip().upper() == c["text"].upper():
-            if untranslated is not None:
-                untranslated.append(("图片内文字", c["text"]))
-            continue
-        out = out.strip()
-        font = font_cjk if _CJK_RE.search(out) else font_latin
+        plan = _plan_one(c, out, untranslated, font_cjk, font_latin)
+        if plan is not None:
+            plans.append(plan)
 
-        r = c["rect"]
-        vertical = c.get("vertical", False)
-        # 两个字高方向的定义要分开算，这是竖排能不能正常写出来的关键：
-        #   横排 —— 字高是框高，排版长度沿框宽往右
-        #   竖排 —— 字高是框宽，排版长度沿框高往上
-        # 混用的话，竖排框宽只有十几点，英文译文几百点长，
-        # 字号会被压到 1 点出头，等于把一个白块留在图上。
-        glyph_h = r.width if vertical else r.height
-        if vertical:
-            maxw = r.height
-        else:
-            # 横向余量压到 0.2 字高。原先是 0.6，英文长句伸出原框，
-            # 伸出去那段下面还压着原文没被盖住，就成了叠影。
-            # 但也不能把填充框跟着译文拉宽 —— 试过，个别 OCR 框一宽，
-            # 整块图纸被涂白（左侧立柱和尺寸线被盖掉），比叠影更糟。
-            # 折中：框不动，让译文缩字号写进框里。
-            maxw = r.width + r.height * 0.2
+    # 复核重译要用的登记记录：每个候选都记一条，写成的带上译文，
+    # 没写成的记 None —— 后者正是「空白块 / 未译」的打回对象，
+    # 拿到更短的译文后还能再写一次。
+    # 写入记录也在这里生成，而不是在 paint_plans 里：记录要能跟登记记录
+    # 对上（rec["mark"]），重写成功后才好把回读校验的期望文本一起换掉，
+    # 否则第二轮复核会拿旧译文去回读，永远判「空白」。
+    by_id = {id(p[0]): p for p in plans}
+    for c in candidates:
+        p = by_id.get(id(c))
+        mark = None
+        if p is not None:
+            mark = {"page": None, "rect": c["rect"],
+                    "out": p[1], "src": c["text"]}
+            if write_marks is not None:
+                write_marks.append(mark)
+        if fixes is not None:
+            fixes.append({"page": None, "kind": "image", "obj": c,
+                          "src": c["text"], "rect": c["rect"],
+                          "out": p[1] if p else None, "mark": mark})
 
-        # 外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
-        # 分两轮写之后，外扩大一点也不会吃掉相邻行的译文了。
-        pad = max(min(glyph_h * 0.32, 2.0), 0.6)
-        fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
-        # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
-        # 宁可留下原文记进未译清单，也不能把图形涂掉
-        if fill.width * fill.height > r.width * r.height * 3.5 + 40:
-            if untranslated is not None:
-                untranslated.append(("图片内文字", c["text"]))
-            continue
+    return paint_plans(page, plans, report)
 
-        # 字号对齐原文字高，放不下再缩；颜色沿用原文字色。
-        # 英文标注普遍比中文窄也比中文矮，用同一个字号会显得偏小，
-        # 乘 1.08 补一点观感；上限仍受排版长度约束
-        size = glyph_h * (1.0 if _CJK_RE.search(out) else 1.08)
-        width = font.text_length(out, fontsize=size)
-        if width > maxw > 0:
-            size = size * maxw / width
-        # 缩到这个程度就不要再写了：原文已经盖掉、字又小到看不清，
-        # 等于在图上留一块白斑。保留原文并如实报进未译清单，
-        # 至少用户还知道这条没翻。
-        #
-        # 两个下限要合起来看：
-        #   绝对下限 3.5pt —— 再小就是屏幕上一根细线
-        #   相对下限 25%  —— 大标题缩到原字高的四分之一以下，
-        #                    和旁边的标注明显不成比例，一眼看出是后贴的
-        # 注意不能卡太死：标题字 28pt、译文变长后缩到 11pt 是正常排版，
-        # 按 45% 卡会把这类正常情况全部拒掉（试过，整页中文一条都写不出来）。
-        if size < max(MIN_WRITE_SIZE, glyph_h * 0.25):
-            if untranslated is not None:
-                untranslated.append(("图片内文字", c["text"]))
-            continue
-        plans.append((c, out, fill, size, font))
+
+def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None):
+    """
+    算出一条图内文字该不该写、写在哪个框里、用多大字号。
+
+    out 为空或和原文一样就不写（返回 None，同时记进未译清单），
+    其余情况返回 (候选, 译文, 填充框, 字号, 字体)。
+
+    这段原先内联在 process_page_images 里，v1.0.8 抽出来是为了让复核打回后
+    的重写走完全相同的排版规则 —— 两条路径各写一份，迟早会走偏。
+    """
+    if not out or not out.strip() or out.strip().upper() == c["text"].upper():
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+    out = out.strip()
+    if font_cjk is None:
+        font_cjk = _get_cjk_font()
+    if font_latin is None:
+        font_latin = pymupdf.Font("helv")
+    font = font_cjk if _CJK_RE.search(out) else font_latin
+
+    r = c["rect"]
+    vertical = c.get("vertical", False)
+    # 两个字高方向的定义要分开算，这是竖排能不能正常写出来的关键：
+    #   横排 —— 字高是框高，排版长度沿框宽往右
+    #   竖排 —— 字高是框宽，排版长度沿框高往上
+    # 混用的话，竖排框宽只有十几点，英文译文几百点长，
+    # 字号会被压到 1 点出头，等于把一个白块留在图上。
+    glyph_h = r.width if vertical else r.height
+    if vertical:
+        maxw = r.height
+    else:
+        # 横向余量压到 0.2 字高。原先是 0.6，英文长句伸出原框，
+        # 伸出去那段下面还压着原文没被盖住，就成了叠影。
+        # 但也不能把填充框跟着译文拉宽 —— 试过，个别 OCR 框一宽，
+        # 整块图纸被涂白（左侧立柱和尺寸线被盖掉），比叠影更糟。
+        # 折中：框不动，让译文缩字号写进框里。
+        maxw = r.width + r.height * 0.2
+
+    # 外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
+    # 分两轮写之后，外扩大一点也不会吃掉相邻行的译文了。
+    pad = max(min(glyph_h * 0.32, 2.0), 0.6)
+    fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
+    # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
+    # 宁可留下原文记进未译清单，也不能把图形涂掉
+    if fill.width * fill.height > r.width * r.height * 3.5 + 40:
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
+    # 字号对齐原文字高，放不下再缩；颜色沿用原文字色。
+    # 英文标注普遍比中文窄也比中文矮，用同一个字号会显得偏小，
+    # 乘 1.08 补一点观感；上限仍受排版长度约束
+    size = glyph_h * (1.0 if _CJK_RE.search(out) else 1.08)
+    width = font.text_length(out, fontsize=size)
+    if width > maxw > 0:
+        size = size * maxw / width
+    # 缩到这个程度就不要再写了：原文已经盖掉、字又小到看不清，
+    # 等于在图上留一块白斑。保留原文并如实报进未译清单，
+    # 至少用户还知道这条没翻。
+    #
+    # 两个下限要合起来看：
+    #   绝对下限 3.5pt —— 再小就是屏幕上一根细线
+    #   相对下限 25%  —— 大标题缩到原字高的四分之一以下，
+    #                    和旁边的标注明显不成比例，一眼看出是后贴的
+    # 注意不能卡太死：标题字 28pt、译文变长后缩到 11pt 是正常排版，
+    # 按 45% 卡会把这类正常情况全部拒掉（试过，整页中文一条都写不出来）。
+    if size < max(MIN_WRITE_SIZE, glyph_h * 0.25):
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+    return (c, out, fill, size, font)
+
+
+def paint_plans(page, plans, report=None):
+    """
+    把排版计划落到页面上，返回写入条数。
+
+    分两轮写：先把所有原文统一盖掉，再统一写译文。
+    一轮一条地处理会互相打架 —— 相邻两行只隔一个多字高，后一条的填充
+    必然压到前一条刚写好的英文上，实测底部那几行长句就是这么整行糊掉的。
+    """
+    if not plans:
+        return 0
 
     # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
     for c, _out, fill, _size, _font in plans:
@@ -499,9 +555,24 @@ def process_page_images(page, translate_fn, used_rects, report,
             tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
                       font=font, fontsize=size)
             tw.write_text(page, color=color)
-        report.append((None, c["text"], out, False))
-        if write_marks is not None:
-            write_marks.append((None, c["rect"], out))
+        if report is not None:
+            report.append((None, c["text"], out, False))
         changed += 1
 
     return changed
+
+
+def rewrite_one(page, cand, out):
+    """
+    复核打回后在原位重写一条图内文字。
+
+    能重写的前提是这条当初被识别出来过（cand 还留着框、背景色、字色），
+    所以不需要重新 OCR；排版规则与首次写入完全一致。
+
+    返回是否写成。写不成说明译文还是太长、字号会缩到不可读，
+    调用方据此如实报「仍未解决」，不能当作已经修好。
+    """
+    plan = _plan_one(cand, out, None)
+    if plan is None:
+        return False
+    return paint_plans(page, [plan]) > 0

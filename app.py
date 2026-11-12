@@ -2287,6 +2287,15 @@ class App(GlassWindow):
                 # 而不是又要自己翻一遍文件去找空白块
                 if review is not None:
                     self.msg_q.put(("log", ("   " + review.summary(), "ok")))
+                    # 打回重译过的要说明白：用户看到「重译过 5 处」才知道
+                    # 这份文件不是一次就过的，哪些地方值得自己再看一眼
+                    if len(review.history) > 1:
+                        self.msg_q.put(("log", (
+                            "   复核过程：" + " → ".join(review.history), "dim")))
+                    # 有改不动的（印章水印）时，文件照样生成，但必须逐条摆出来，
+                    # 不能让人以为整份都干净了
+                    for line in review.tolerable_lines():
+                        self.msg_q.put(("log", (line, "warn")))
                     if review.ai_checked == 0 and review.ai_note:
                         self.msg_q.put(("log", ("   " + review.ai_note, "dim")))
                 # 翻译版是主交付物，记账时用它做归属
@@ -2755,6 +2764,73 @@ def _selftest():
                   f"残留{'能识别' if _leftover else '漏判'}")
         except Exception as exc:
             check(T("输出前复核"), False, f"{type(exc).__name__}: {exc}")
+
+        # 打回重译：复核判「没译出来」之后，能不能只重翻那一条、在原位写上，
+        # 再在第二轮复核通过。这是 v1.0.8 流程的核心环节，必须真跑一遍 ——
+        # 光测「能判出问题」没用，判出来之后修不回来，结果一样是不出文件。
+        # 中文必须嵌真字体才回读得出来：insert_text 默认用的内置拉丁字体
+        # 没有中文的 ToUnicode 映射，抽回来是一串「····」，
+        # 那样测出来的「通过」是假的。
+        try:
+            from core import pdf_engine as _pe
+            from core import review as _rv
+
+            class _RetryStub:
+                """只实现重译接口的替身：每次都给出合格的英文译文"""
+                metric_report = None
+
+                def review_candidates(self, limit=30):
+                    return []
+
+                def retranslate(self, items):
+                    return ["Chinese label" for _ in items]
+
+            _cjk = cjk_font     # 自检前面已经找到的系统中文字体
+
+            def _cjk_page(text):
+                d = pymupdf.open()
+                pg = d.new_page(width=320, height=200)
+                pg.insert_font(fontname="cjk", fontfile=_cjk)
+                pg.insert_text((50, 55), text, fontname="cjk", fontsize=12)
+                return d
+
+            _d2 = _cjk_page("中文标注")
+            _g = _pe.TextGroup()
+            _g.text = "中文标注"
+            _g.rect = pymupdf.Rect(48, 40, 160, 60)
+            _g.origin = pymupdf.Point(50, 55)
+            _g.size = 12
+            _g.color = 0
+            _rec = {"page": 1, "kind": "single", "obj": _g, "src": "中文标注",
+                    "rect": _g.rect, "out": None, "lang": "zh", "mark": None}
+            _stat = {"untranslated": [(1, "中文标注")]}
+            _rep, _blocked = _pe._review_with_retries(
+                _d2, [], _stat, [_rec], _RetryStub(), "en")
+            _page_text = _d2[0].get_text()
+            _d2.close()
+            check(T("复核打回重译"),
+                  (not _blocked) and _rep.round >= 2
+                  and "Chinese" in _page_text
+                  and not _rv._CJK.search(_page_text),
+                  f"轮次={_rep.round} · "
+                  f"{'重译后通过' if not _blocked else '仍被拦下'} · "
+                  f"页面上{'已换成译文' if 'Chinese' in _page_text else '仍是原文'}")
+        except Exception as exc:
+            check(T("复核打回重译"), False, f"{type(exc).__name__}: {exc}")
+
+        # 不可译内容要能放行：印章、水印这类字定位不到替换框，改不动。
+        # 一律拦住的话，带印章的图纸永远出不来 —— 所以要提示但不阻断。
+        try:
+            _d4 = _cjk_page("公司图签")
+            _rep4, _blocked4 = _pe._review_with_retries(
+                _d4, [], {"untranslated": []}, [], _RetryStub(), "en")
+            _d4.close()
+            check(T("不可译内容放行"),
+                  (not _blocked4) and len(_rep4.tolerable) >= 1,
+                  f"{'已放行' if not _blocked4 else '仍被阻断'} · "
+                  f"提示 {len(_rep4.tolerable)} 处")
+        except Exception as exc:
+            check(T("不可译内容放行"), False, f"{type(exc).__name__}: {exc}")
 
         # 反方向：公制 → 英制。这是新增的输出单位，主链路里最容易接线漏掉的一环
         # （换算通了但单位声明没改、标注版标错单位，都属于这里能抓到的问题）
