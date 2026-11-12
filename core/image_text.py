@@ -71,6 +71,11 @@ MIN_CONF = 0.50       # OCR 置信度下限，太低的多半是图形噪点
 MAX_BG_STD = 46       # 背景色标准差上限：背景太花就不动，免得盖出色块
 MIN_CONTRAST = 34     # 文字与背景的最小亮度差，太接近说明识别到的是图形噪点
 
+# 写回字号的下限。低于这个值的字印在图纸上等于没写：
+# 原文被背景色盖掉，新文字小到看不清，用户看到的就是一块空白。
+# 宁可这一条不写（保留原文、记进未译清单），也不能交出一块白斑。
+MIN_WRITE_SIZE = 3.5
+
 _ocr_engine = None
 _font_cjk = None
 
@@ -365,9 +370,19 @@ def process_page_images(page, translate_fn, used_rects, report,
                     untranslated.append(("图片内文字", text))
                 continue
 
+            # 竖排还是横排：OCR 返回的框是轴对齐矩形，给不出文字朝向，
+            # 只能靠长宽比认。竖排的是尺寸线旁边的旋转标注（制图标准里
+            # 逆时针 90°，从下往上读），横排的是普通说明。
+            # 这一步必须区分：竖排框宽度只有十几点，若当水平文字排版，
+            # 可排版长度就等于框宽，几百点长的英文译文会把字号压到 1 点，
+            # 图上看着就是一片空白 —— 客户报的就是这个。
+            bw = max(xs) - min(xs)
+            bh = max(ys) - min(ys)
+            vertical = bh > bw * 1.5
+
             bg, fg, _std = sampled
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
-                               "fg": fg, "hint": hint})
+                               "fg": fg, "hint": hint, "vertical": vertical})
 
     if not candidates:
         return 0
@@ -406,16 +421,26 @@ def process_page_images(page, translate_fn, used_rects, report,
         font = font_cjk if _CJK_RE.search(out) else font_latin
 
         r = c["rect"]
-        h = r.height
-        # 横向余量压到 0.2 字高。原先是 0.6，英文长句伸出原框，
-        # 伸出去那段下面还压着原文没被盖住，就成了叠影。
-        # 但也不能把填充框跟着译文拉宽 —— 试过，个别 OCR 框一宽，
-        # 整块图纸被涂白（左侧立柱和尺寸线被盖掉），比叠影更糟。
-        # 折中：框不动，让译文缩字号写进框里。
-        maxw = r.width + h * 0.2
-        # 纵向外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
+        vertical = c.get("vertical", False)
+        # 两个字高方向的定义要分开算，这是竖排能不能正常写出来的关键：
+        #   横排 —— 字高是框高，排版长度沿框宽往右
+        #   竖排 —— 字高是框宽，排版长度沿框高往上
+        # 混用的话，竖排框宽只有十几点，英文译文几百点长，
+        # 字号会被压到 1 点出头，等于把一个白块留在图上。
+        glyph_h = r.width if vertical else r.height
+        if vertical:
+            maxw = r.height
+        else:
+            # 横向余量压到 0.2 字高。原先是 0.6，英文长句伸出原框，
+            # 伸出去那段下面还压着原文没被盖住，就成了叠影。
+            # 但也不能把填充框跟着译文拉宽 —— 试过，个别 OCR 框一宽，
+            # 整块图纸被涂白（左侧立柱和尺寸线被盖掉），比叠影更糟。
+            # 折中：框不动，让译文缩字号写进框里。
+            maxw = r.width + r.height * 0.2
+
+        # 外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
         # 分两轮写之后，外扩大一点也不会吃掉相邻行的译文了。
-        pad = max(min(h * 0.32, 2.0), 0.6)
+        pad = max(min(glyph_h * 0.32, 2.0), 0.6)
         fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
         # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
         # 宁可留下原文记进未译清单，也不能把图形涂掉
@@ -424,13 +449,27 @@ def process_page_images(page, translate_fn, used_rects, report,
                 untranslated.append(("图片内文字", c["text"]))
             continue
 
-        # 字号对齐原文字高度，放不下再缩；颜色沿用原文字色。
+        # 字号对齐原文字高，放不下再缩；颜色沿用原文字色。
         # 英文标注普遍比中文窄也比中文矮，用同一个字号会显得偏小，
-        # 乘 1.08 补一点观感；上限仍受文字框宽度约束
-        size = h * (1.0 if _CJK_RE.search(out) else 1.08)
+        # 乘 1.08 补一点观感；上限仍受排版长度约束
+        size = glyph_h * (1.0 if _CJK_RE.search(out) else 1.08)
         width = font.text_length(out, fontsize=size)
         if width > maxw > 0:
             size = size * maxw / width
+        # 缩到这个程度就不要再写了：原文已经盖掉、字又小到看不清，
+        # 等于在图上留一块白斑。保留原文并如实报进未译清单，
+        # 至少用户还知道这条没翻。
+        #
+        # 两个下限要合起来看：
+        #   绝对下限 3.5pt —— 再小就是屏幕上一根细线
+        #   相对下限 25%  —— 大标题缩到原字高的四分之一以下，
+        #                    和旁边的标注明显不成比例，一眼看出是后贴的
+        # 注意不能卡太死：标题字 28pt、译文变长后缩到 11pt 是正常排版，
+        # 按 45% 卡会把这类正常情况全部拒掉（试过，整页中文一条都写不出来）。
+        if size < max(MIN_WRITE_SIZE, glyph_h * 0.25):
+            if untranslated is not None:
+                untranslated.append(("图片内文字", c["text"]))
+            continue
         plans.append((c, out, fill, size, font))
 
     # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
@@ -442,9 +481,20 @@ def process_page_images(page, translate_fn, used_rects, report,
     changed = 0
     for c, out, _fill, size, font in plans:
         tw = pymupdf.TextWriter(page.rect)
-        tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
-                  font=font, fontsize=size)
-        tw.write_text(page, color=tuple(float(v) / 255 for v in c["fg"]))
+        color = tuple(float(v) / 255 for v in c["fg"])
+        if c.get("vertical"):
+            # 竖排标注逆时针 90° 写回：以框右下角为 baseline 起点，
+            # 文字向上生长，字身落在基线左侧，正好覆盖原框。
+            # Matrix(90) 在 y 轴向下的坐标系里是逆时针 90°，
+            # 和制图标准里垂直尺寸数字的朝向一致（从下往上读）。
+            # 若按水平写法铺在十几点宽的窄框里，字会被压成一条缝。
+            pivot = pymupdf.Point(c["rect"].x1, c["rect"].y1)
+            tw.append(pivot, out, font=font, fontsize=size)
+            tw.write_text(page, color=color, morph=(pivot, pymupdf.Matrix(90)))
+        else:
+            tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
+                      font=font, fontsize=size)
+            tw.write_text(page, color=color)
         report.append((None, c["text"], out, False))
         changed += 1
 

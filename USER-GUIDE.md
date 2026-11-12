@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.4
+Version 1.0.5
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.4.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.5.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -661,6 +661,13 @@ a grey object.
 Safety boundary: busy backgrounds, patterns and strong textures are left untouched rather
 than repainted, and listed as untranslated.
 
+Rotated labels (text turned 90° beside dimension lines) are written back in their original
+direction rather than flattened to horizontal. Laid out horizontally inside a box ten points
+wide, the text collapses to an unreadable smear that reads as a blank patch. When the
+translation is longer than the original, the font shrinks; if it would drop below a quarter
+of the original height, that one is skipped, the original is left in place, and it is listed
+as untranslated — a missing translation is easier to explain than a white smudge.
+
 ---
 
 ## 10 Glossary and corrections
@@ -731,7 +738,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.4.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.5.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 
