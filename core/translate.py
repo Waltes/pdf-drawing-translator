@@ -47,6 +47,31 @@ HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
 NUM_RE = re.compile(r"\d+(?:[.\-/]\d+)*")
 
+# 公制长度单位 → 毫米的换算表，只为「数字保真」校验服务，不参与任何实际改写。
+# 为什么需要它：中文图纸写「2.79米长」，模型按图纸习惯改写成「2790.00 mm」，
+# 这是完全正确的换写法。但校验拿原文的 2.79 去译文里逐字找，一定找不到，
+# 于是判「数字对不上」、把整条退回中文原文 —— 客户看到的就是一句没翻的中文。
+# 有了这张表，同制内的换写法能过，跨制算错（4-1/8" 写成 100mm）照样被拦。
+_METRIC_TO_MM = {
+    "千米": 1_000_000.0, "公里": 1_000_000.0, "km": 1_000_000.0,
+    "分米": 100.0, "dm": 100.0,
+    "厘米": 10.0, "cm": 10.0,
+    "毫米": 1.0, "mm": 1.0,
+    "米": 1000.0, "m": 1000.0,
+}
+# 中文单位统一折算成英文代号，好跟译文里的单位对上号
+_UNIT_CANON = {
+    "千米": "km", "公里": "km", "分米": "dm", "厘米": "cm", "毫米": "mm", "米": "m",
+}
+# 长的单位名必须排在前面，否则「毫米」会被「米」先吃掉半截。
+# 结尾的 (?![a-z]) 是防「5min」里的 m 被当成米。
+_NUM_UNIT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(千米|公里|分米|厘米|毫米|米|km|dm|cm|mm|m)(?![a-z])",
+    re.IGNORECASE)
+# 译文侧只认英文单位代号
+_NUM_UNIT_OUT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(km|dm|cm|mm|m)(?![a-z])", re.IGNORECASE)
+
 # 中文译文里允许保留的计量单位（图纸单位随原图，不翻译）。
 # 只在这些词紧跟数字时才放行，避免把句子里的普通英文单词（如 in）当成单位漏过。
 UNIT_WORDS = {
@@ -1747,19 +1772,13 @@ class Translator:
         return True
 
     @staticmethod
-    def _num_close(token, out):
+    def _num_close_val(want, out):
         """
-        数值近似比对：token 这个数在 out 里有没有「数值上够接近」的数。
+        数值近似比对：want 这个数在 out 里有没有「数值上够接近」的数。
 
-        为什么不能只做字符串包含：换算后我们期望 104.78，模型偶尔按一位小数
-        写成 104.8，字符串对不上就整条判不合格、图纸退回英文，白白丢一条。
-        容差取 max(0.05, |v|×0.1%)：放过小数位差异，抓得住实打实算错的
-        （4-1/8" 写成 100mm 差 4.78，照样被拦）。
+        容差取 max(0.05, |v|×0.1%)：放过小数位差异（104.78 写成 104.8），
+        抓得住实打实算错的（4-1/8" 写成 100mm 差 4.78，照样被拦）。
         """
-        try:
-            want = float(token)
-        except ValueError:
-            return False
         tol = max(0.05, abs(want) * 0.001)
         for s in NUM_RE.findall(out or ""):
             try:
@@ -1769,6 +1788,72 @@ class Translator:
             if abs(got - want) <= tol:
                 return True
         return False
+
+    @staticmethod
+    def _same_unit_equiv(src):
+        """
+        把原文里「带公制单位的数值」折成毫米基准，返回 {原写法: {单位: 该单位下的等值}}。
+
+        例：'2根5毫米厚镀锌铁板2.79米长'
+            → {'5': {'mm': 5.0, 'cm': 0.5, ...},
+               '2.79': {'mm': 2790.0, 'cm': 279.0, 'm': 2.79, ...}}
+
+        只记「单位 → 值」的对应，不记一堆裸数字：只记裸数字的话，
+        模型把 2.79 米错写成 279 mm 也会命中（279 恰好是 279 厘米的值），
+        等于把算错数放过了。带单位比对才分得清「换成毫米写」和「算错了」。
+        """
+        table = {}
+        for m in _NUM_UNIT_RE.finditer(src or ""):
+            num, raw_unit = m.group(1), m.group(2)
+            canon = _UNIT_CANON.get(raw_unit, raw_unit.lower())
+            factor = _METRIC_TO_MM.get(raw_unit) or _METRIC_TO_MM.get(canon)
+            if not factor:
+                continue
+            try:
+                mm = float(num) * factor
+            except ValueError:
+                continue
+            slot = table.setdefault(num, {})
+            # 同一物理量在每个公制单位下的写法，各自记清楚是谁
+            for unit, f in (("km", 1_000_000.0), ("dm", 100.0),
+                            ("cm", 10.0), ("mm", 1.0), ("m", 1000.0)):
+                slot[unit] = mm / f
+        return table
+
+    @staticmethod
+    def _unit_equiv_hit(expect, out):
+        """
+        译文里有没有「数值 + 单位」跟期望的某一条对得上。
+
+        只认译文自己写明的单位：'2790.00 mm' 命中 2.79 米，'279 mm' 不命中。
+        """
+        if not expect:
+            return False
+        for m in _NUM_UNIT_OUT_RE.finditer(out or ""):
+            try:
+                got = float(m.group(1))
+            except ValueError:
+                continue
+            want = expect.get(m.group(2).lower())
+            if want is None:
+                continue
+            if abs(got - want) <= max(0.05, abs(want) * 0.001):
+                return True
+        return False
+
+    @staticmethod
+    def _num_close(token, out):
+        """
+        数值近似比对：token 这个数在 out 里有没有「数值上够接近」的数。
+
+        为什么不能只做字符串包含：换算后我们期望 104.78，模型偶尔按一位小数
+        写成 104.8，字符串对不上就整条判不合格、图纸退回英文，白白丢一条。
+        """
+        try:
+            want = float(token)
+        except ValueError:
+            return False
+        return Translator._num_close_val(want, out)
 
     def _numbers_preserved(self, src, out, dst="zh"):
         """
@@ -1784,6 +1869,10 @@ class Translator:
         「8 ft 译成 8 ft fence 是正常写法」而跳过。现在单位规则由用户选，
         中译英也可能要求换成英制（或反过来），按方向判断会漏掉一半情况。
         两头都按 mode 换算，比的是「同一条标准」。
+
+        同制内的换写法也放行：原文「2.79米」，译文「2790 mm」是对的，
+        但逐字比对找不到 2.79。少了这条例外，中→英图纸里所有以「米」
+        标注的长边（2.79米、1.103米……）都会被判算错数、原样退回中文。
         """
         if src:
             if self.unit_mode == UNIT_METRIC and has_imperial(src):
@@ -1793,14 +1882,19 @@ class Translator:
         nums = NUM_RE.findall(src or "")
         if not nums:
             return True
+        # 原文里带公制单位的数值 → 它在各公制单位下的等值。只在这条判定里用。
+        equiv = self._same_unit_equiv(src)
         for n in nums:
             if n in out:
                 continue
             # 允许 4-1/8 被写成 4-1/8 或 4 1/8，宽松匹配数字主体
             if n.replace("-", " ") in out.replace("-", " "):
                 continue
-            # 最后一道：纯数值的近似比对（应对小数位写法差异）
+            # 纯数值的近似比对（应对小数位写法差异）
             if self._num_close(n, out):
+                continue
+            # 同制换写法：2.79米 写成 2790mm 是正确表达，不是算错数
+            if self._unit_equiv_hit(equiv.get(n), out):
                 continue
             return False
         return True

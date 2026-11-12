@@ -7,8 +7,8 @@
 # 而我们这个版本是发给国外用户用的，所以英文表放在前面（找不到匹配时用它兜底）。
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 0, 5, 0),
-        prodvers=(1, 0, 5, 0),
+        filevers=(1, 0, 6, 0),
+        prodvers=(1, 0, 6, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -25,12 +25,12 @@ VSVersionInfo(
                     StringStruct("CompanyName", "PDF Drawing Translator · open source"),
                     StringStruct("FileDescription",
                                  "Translate engineering drawings (PDF) in place"),
-                    StringStruct("FileVersion", "1.0.5.0"),
+                    StringStruct("FileVersion", "1.0.6.0"),
                     StringStruct("InternalName", "PDFTranslator"),
                     StringStruct("LegalCopyright", "MIT License"),
                     StringStruct("OriginalFilename", "PDF图纸翻译.exe"),
                     StringStruct("ProductName", "PDF Drawing Translator"),
-                    StringStruct("ProductVersion", "1.0.5.0"),
+                    StringStruct("ProductVersion", "1.0.6.0"),
                 ],
             ),
             # 中文（0804 = zh-CN，04B0 = Unicode）
@@ -39,12 +39,12 @@ VSVersionInfo(
                 [
                     StringStruct("CompanyName", "PDF 图纸翻译 · 开源项目"),
                     StringStruct("FileDescription", "PDF 图纸翻译工具"),
-                    StringStruct("FileVersion", "1.0.5.0"),
+                    StringStruct("FileVersion", "1.0.6.0"),
                     StringStruct("InternalName", "PDFTranslator"),
                     StringStruct("LegalCopyright", "MIT License"),
                     StringStruct("OriginalFilename", "PDF图纸翻译.exe"),
                     StringStruct("ProductName", "PDF 图纸翻译"),
-                    StringStruct("ProductVersion", "1.0.5.0"),
+                    StringStruct("ProductVersion", "1.0.6.0"),
                 ],
             )
         ]),
