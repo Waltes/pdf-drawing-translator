@@ -2017,22 +2017,67 @@ class App(GlassWindow):
         except Exception:
             pass
 
-    def _add_paths(self, paths):
-        added = 0
+    @staticmethod
+    def _clean_paths(paths):
+        """把拖进来/选进来的字符串收拾成一份去重后的 PDF 路径清单。
+
+        拖拽事件给的是 Windows 风格的一串路径，重复拖同一份要过滤掉，
+        否则列表面会出现两行同名文件，跑起来翻两遍。
+        """
+        out = []
         for p in paths:
-            if p and p.lower().endswith(".pdf") and os.path.isfile(p) \
-                    and p not in self.files:
+            p = (p or "").strip()
+            if p.lower().endswith(".pdf") and os.path.isfile(p) and p not in out:
+                out.append(p)
+        return out
+
+    def _add_paths(self, paths):
+        """追加到待翻译列表（「选择文件」用）。返回实际加入的条数。"""
+        added = 0
+        for p in self._clean_paths(paths):
+            if p not in self.files:
                 self.files.append(p)
                 added += 1
         if added:
             self._fill_list()
         return added
 
+    def _replace_paths(self, paths):
+        """
+        用这一批文件替换待翻译列表（拖拽用）。
+
+        为什么拖拽是替换而不是追加：
+        用户的直觉是「我拖了什么，就翻什么」。原来的做法是往后追加，
+        上一次翻过的文件还赖在列表里，这次再点开始就会先翻旧的那份 ——
+        客户就踩到了这个坑：拖入新图纸，结果日志里跑的是上一份。
+        想攒一批再翻，用「选择文件」多次添加即可（那条路仍是追加）。
+
+        返回 (放入的份数, 被移出的份数)。磁盘上的 PDF 一概不动。
+        """
+        clean = self._clean_paths(paths)
+        if not clean:
+            return 0, 0
+        dropped = len([p for p in self.files if p not in clean])
+        self.files = clean
+        self._fill_list()
+        return len(clean), dropped
+
     def _on_drop(self, event):
+        if self.busy:
+            self._say(T("正在转换，等这一轮跑完再拖文件进来。"), "warn")
+            return
         paths = [(a or b).strip() for a, b in re.findall(r"\{([^}]+)\}|(\S+)", event.data)]
-        added = self._add_paths(paths)
-        if added:
-            self._say(i18n.fmt("已加入 {n} 个文件。", n=added), "ok")
+        n, dropped = self._replace_paths(paths)
+        if not n:
+            return
+        if dropped:
+            # 移出列表这件事必须说清楚：用户可能上一轮特意攒了清单，
+            # 一拖就被顶掉会以为文件丢了。强调「磁盘上的没动」。
+            self._say(i18n.fmt("已换成刚拖入的 {n} 个文件，原来列表里的 {d} 个已移出"
+                               "（磁盘上的 PDF 没动）。要接着翻那几份，"
+                               "用「选择文件」加回来。", n=n, d=dropped), "ok")
+        else:
+            self._say(i18n.fmt("已加入 {n} 个文件。", n=n), "ok")
 
     def _pick_files(self):
         if self.busy:
@@ -2042,6 +2087,10 @@ class App(GlassWindow):
         self._add_paths(list(picked))
 
     def _remove_selected(self):
+        # 转换中不让改列表：worker 手里正攥着这一轮的清单，
+        # 边跑边删会让「第几份 / 共几份」的进度对不上
+        if self.busy:
+            return
         for i in reversed(self.listbox.curselection()):
             self.listbox.delete(i)
             self.files.pop(i)
@@ -2063,6 +2112,21 @@ class App(GlassWindow):
 
     def _refresh_count(self):
         self.lbl_count.config(text=i18n.fmt("待翻译文件（{n}）", n=len(self.files)))
+
+    def _dequeue(self, path):
+        """
+        把已经翻完的这份从「待翻译」列表里拿掉。只改列表，磁盘上的 PDF 不动。
+
+        列表的语义就是「还没翻的」：翻过的不划掉，用户下次拖入新文件时
+        就会看到旧的一起排在前面，再点开始又把它翻一遍。
+        """
+        try:
+            self.files.remove(path)
+        except ValueError:
+            # 执行期间列表被改过（理论上点「选择文件」已被 busy 拦住，
+            # 这里只是兜底），找不到就什么也不做
+            return
+        self._fill_list()
 
     def _pick_outdir(self):
         d = filedialog.askdirectory(title=T("选择输出目录"))
@@ -2091,6 +2155,10 @@ class App(GlassWindow):
                         self.dlg.on_balance_result(*payload)
                 elif kind == "progress":
                     self.set_progress(*payload)
+                elif kind == "dequeue":
+                    # 工作线程报告「这份翻完了」。改列表和重画界面必须在主线程，
+                    # Tk 控件不是线程安全的
+                    self._dequeue(payload)
                 elif kind == "strip":
                     self.refresh_strip()
                 elif kind == "ask":
@@ -2137,7 +2205,11 @@ class App(GlassWindow):
                         "用完后该句保留原文。") + "\n", "warn")
 
         self.translator.llm.usage.reset_session()
-        threading.Thread(target=self._worker, daemon=True).start()
+        # 快照这一轮要翻的清单：worker 跑起来之后列表还会变 ——
+        # 每翻完一份就把它从「待翻译」里划掉，直接拿 self.files 迭代
+        # 会在遍历途中被改，导致漏翻或多翻。
+        threading.Thread(target=self._worker, args=(list(self.files),),
+                         daemon=True).start()
 
     def _ask_main(self, title, question, timeout=300):
         """
@@ -2155,7 +2227,7 @@ class App(GlassWindow):
         ev.wait(timeout)
         return box["answer"]
 
-    def _worker(self):
+    def _worker(self, batch):
         outputs = []      # 各份的主交付物（翻译版），只用于记账归属
         folders = []      # 本轮生成的输出文件夹，完成时按文件夹展示
         # 哪些文件夹没出标注版、以及为什么。三种原因给的说明完全不同：
@@ -2164,7 +2236,7 @@ class App(GlassWindow):
         mark_skip = {}
         mode = self.translator.unit_mode
         try:
-            for idx, path in enumerate(self.files):
+            for idx, path in enumerate(batch):
                 name = os.path.basename(path)
                 self.msg_q.put(("log", (f"── {name}", "accent")))
 
@@ -2228,7 +2300,7 @@ class App(GlassWindow):
                                  p=folder, e=type(exc).__name__, m=exc), "err")))
                     continue
 
-                self.msg_q.put(("progress", (idx, len(self.files))))
+                self.msg_q.put(("progress", (idx, len(batch))))
 
                 def on_page(done, total, msg):
                     self.msg_q.put(("log", ("    " + msg, "dim")))
@@ -2444,6 +2516,11 @@ class App(GlassWindow):
                                      f=os.path.basename(check_file)), "warn")))
 
                 folders.append(folder)
+                # 这一份翻完了，从「待翻译」里划掉。
+                # 留着不出大事却会出事：下次再点开始，它会先翻这份旧的 ——
+                # 客户拖入新图纸、点了开始、日志里跑的却是上一份，就是这么来的。
+                # 跳过和失败的留在列表里，方便直接重试。
+                self.msg_q.put(("dequeue", path))
 
         except Exception:
             self.msg_q.put(("log", (T("转换出错：") + "\n" + traceback.format_exc(), "err")))

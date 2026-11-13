@@ -102,6 +102,14 @@ EN = {
         "Remove the {n} file(s) from the list?\nThey are only taken off the list — "
         "the PDFs on disk are not deleted.",
     "已加入 {n} 个文件。": "Added {n} file(s).",
+    "正在转换，等这一轮跑完再拖文件进来。":
+        "A conversion is running — drop files in once this round finishes.",
+    "已换成刚拖入的 {n} 个文件，原来列表里的 {d} 个已移出"
+    "（磁盘上的 PDF 没动）。要接着翻那几份，"
+    "用「选择文件」加回来。":
+        "Switched to the {n} file(s) you just dropped; {d} file(s) were taken off "
+        "the list (the PDFs on disk are untouched). Use the file picker to add "
+        "those back if you still need them.",
     "选择 PDF 图纸": "Choose PDF drawings",
     "PDF 文件": "PDF files",
 

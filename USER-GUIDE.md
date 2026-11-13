@@ -371,6 +371,19 @@ loopback.
 During the run the log pane at the bottom of the window reports progress and statistics.
 When it finishes you can open the output folder from there.
 
+The "files to translate" list holds exactly what this run will process. Two rules:
+
+- **Dropping replaces the list.** Whatever you drop is what gets translated; anything
+  that was queued is taken off the list. Nothing on disk is touched. Add those files
+  back with the file picker if you still need them.
+- **Finished files leave the list.** Each file is removed as soon as its run completes,
+  so the list always shows what is still pending. Files that were skipped or failed stay
+  on the list so you can retry them after adjusting the settings.
+
+That means you can drop the next drawing straight in without the previous one being
+translated a second time. The file picker appends instead, which is handy for building
+up a batch before pressing Start.
+
 ### 5.2 Output files
 
 Each PDF produces its own folder, named after the file:
