@@ -10,6 +10,9 @@
                     **但文件照出**，未译清单位置要写清楚（v1.0.9 的规矩）
   D 框太窄       —— 文字层折两行，不溢出、不留空白
   E 窄到折也放不下 —— 保留原文，不出白块，文件照出
+  F 折行后又重写 —— 上一版溢出框外的那截必须擦掉，不能留半截旧词（v1.1.0）
+  G 同页同样两处 —— 一处写成一处置空时，未译清单不能被整条划掉（v1.1.0）
+  H 重译修好了   —— 账本里的旧账要清，否则报告永远挂着同一条（v1.1.0）
 
 中文必须嵌真字体才回读得出来：insert_text 默认用的内置拉丁字体没有中文的
 ToUnicode 映射，抽回来是一串「····」，那样测出来的「通过」是假的。
@@ -22,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pymupdf
 from core import pdf_engine
-from core.translate import MetricReport
+from core.translate import MetricReport, verify_metric_output
 
 CJK = r"C:\Windows\Fonts\msyh.ttc"
 GOOD = "2 pcs 5 mm galvanized plate, 2790 mm long"
@@ -176,6 +179,123 @@ def run_wrap_case(tmp, narrow, expect_lines):
     return ok
 
 
+def run_ghost_case(tmp):
+    """
+    F 折行写完再打回重写：上一版写到框外的那一截必须一起擦掉。
+
+    v1.0.9 只按原框擦，折出来的第二行顶着原框上沿、单行还可能溢出到 1.4 倍
+    框宽 —— 溢出部分擦不掉，重写后页面上就留着上一版的半截旧词
+    （实测残留过一个 H）。这种字没人会当成「没翻」去查，只会觉得图上有个怪符号。
+    """
+    src = os.path.join(tmp, "F_in.pdf")
+    d = pymupdf.open()
+    p = d.new_page(width=420, height=300)
+    p.insert_font(fontname="cjk", fontfile=CJK)
+    p.insert_text((40, 60), "门板门板门板门板", fontname="cjk", fontsize=12)
+    d.save(src)
+    d.close()
+
+    d = pymupdf.open(src)
+    p = d[0]
+    g = pdf_engine.extract_groups(p)[0]
+    first = "DOOR PANEL WITH HINGE AND LOCK"
+    plan = pdf_engine.plan_group(g, first, pdf_engine.text_obstacles(p, [g.rect]))
+    pdf_engine.erase_text(p, [g])
+    pdf_engine.write_groups(p, [(g, first)], plans=[plan])
+    ink = [r for r in (g.rect, plan.get("ink")) if r is not None]
+
+    rec = {"page": 1, "kind": "single", "obj": g, "src": "门板门板门板门板",
+           "rect": g.rect, "ink": ink, "out": first, "lang": "zh"}
+    ok_write = pdf_engine._rewrite_record(d, rec, "门板")
+    text = p.get_text().strip()
+    d.close()
+
+    # 旧译文的任何一个词都不该留在这页上
+    ghost = [w for w in ("DOOR", "PANEL", "HINGE", "LOCK") if w in text]
+    ok = ok_write and not ghost and "门板" in text
+    print(f"[{'通过' if ok else '失败'}] F 折行重写不留残影")
+    print(f"    重写={ok_write} 页面={text!r} 残留={ghost or '无'}")
+    return ok
+
+
+def run_prune_case():
+    """
+    G 同一页两处一模一样的原文，一处写成了、一处框太窄没写成。
+
+    未译清单里只有没写成的那一条，划账时必须看「这一处的记录是不是都写成了」，
+    不能按「页码 + 原文」一刀切 —— 切掉之后清单说全部译出，图上还留着原文，
+    而目标中文时复核不做文字层残留扫描，这一处就彻底没人发现了。
+    """
+    half = {"untranslated": [(1, "DOOR PANEL")]}
+    pdf_engine._prune_untranslated(
+        half, [{"page": 1, "src": "DOOR PANEL", "out": "门板"},
+               {"page": 1, "src": "DOOR PANEL", "out": None}])
+    whole = {"untranslated": [(1, "DOOR PANEL")]}
+    pdf_engine._prune_untranslated(
+        whole, [{"page": 1, "src": "DOOR PANEL", "out": "门板"}])
+    ok = bool(half["untranslated"]) and not whole["untranslated"]
+    print(f"[{'通过' if ok else '失败'}] G 未译清单不误划")
+    print(f"    只写成一处的清单={half['untranslated']} · "
+          f"两处都写成的清单={whole['untranslated']}")
+    return ok
+
+
+def run_ledger_case(tmp):
+    """
+    H 一条译文第一次算错、重译后算对，账本里的旧账要跟着清。
+
+    不清的话第二轮复核照旧按第一次的结果报同一处，报告里挂着一条早就修好的
+    「数值可疑」—— 用户拿着清单去核对，怎么核都对，最后只能怀疑工具坏了。
+    """
+    class T(FakeTranslator):
+        """出口复现真实链路的复算记账"""
+
+        def translate_many(self, items, max_workers=12, progress=None):
+            self.batch_calls += 1
+            out = []
+            for t, _l in items:
+                val, _i = verify_metric_output(
+                    t, "508 mm x 1000 mm x 25 mm", dst="en", page=1,
+                    report=self.metric_report, mode="metric")
+                out.append(val)
+            return out
+
+        def retranslate(self, items):
+            self.retry_calls += 1
+            out = []
+            for src, _h, _w in items:
+                val, _i = verify_metric_output(
+                    src, "1270 mm x 508 mm", dst="en", page=1,
+                    report=self.metric_report, mode="metric")
+                out.append(val)
+            return out
+
+    src = os.path.join(tmp, "H_in.pdf")
+    out = os.path.join(tmp, "H_out.pdf")
+    make_pdf(src, ["50 in. wide x 20 in. deep"])
+    tr = T()
+    # 首轮就让它带着一条 warn 进场，模拟「第一次复算没过」
+    tr.metric_report.add("warn", 1, "50 in. wide x 20 in. deep",
+                         "508 mm x 1000 mm x 25 mm", "译文数值与复算不符")
+    stats = {}
+    pdf_engine.process_pdf(src, out, tr, render_preview=False,
+                           translate_batch=tr.translate_many, scan_images=False,
+                           stats_out=stats, dst_lang="en", reviewer=tr, verify=True)
+    rep = stats.get("review")
+    numbers = len([it for it in rep.issues if it.kind == "number"]) if rep else -1
+    text = ""
+    if os.path.exists(out):
+        dd = pymupdf.open(out)
+        text = dd[0].get_text().strip()
+        dd.close()
+    ok = (os.path.exists(out) and not stats.get("review_unresolved")
+          and numbers == 0 and "1270.00" in text)
+    print(f"[{'通过' if ok else '失败'}] H 重译修好后不再挂旧账")
+    print(f"    遗留={stats.get('review_unresolved')} 数值问题={numbers} "
+          f"页面={text!r}")
+    return ok
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="retry_")
     lines = ["托盘承重 500 公斤", "护栏总长 3.05 米"]
@@ -186,6 +306,9 @@ def main():
                  True, True, tmp),
         run_wrap_case(tmp, narrow=True, expect_lines=2),
         run_wrap_case(tmp, narrow=False, expect_lines=1),
+        run_ghost_case(tmp),
+        run_prune_case(),
+        run_ledger_case(tmp),
     ]
     print("\n结论:", "全部通过" if all(results) else "有失败项")
     return 0 if all(results) else 1

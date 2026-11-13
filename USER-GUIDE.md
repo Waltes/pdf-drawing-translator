@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.9
+Version 1.1.0
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.9.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.0.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -469,7 +469,7 @@ practice: the rejected spots are exactly the ones you cannot do anything about (
 cell 8pt wide, Chinese characters inside a stamp), so you reran the file over and over and
 only ever got "fix the items above and run again".
 
-Five things are checked:
+Six things are checked:
 
 | Check | What it looks for | What you get if it is skipped |
 |---|---|---|
@@ -477,10 +477,26 @@ Five things are checked:
 | Leftovers | A whole line still in the source language | Your customer sees a foreign sentence |
 | Coverage | Nothing at all was replaced | You ship the original file by accident |
 | Number re-check | Do converted values match a fresh calculation from the source | Wrong dimensions, wrongly cut parts |
+| Number count | Does the count of values in a line match the source | One dimension merged away or lost |
 | Semantic spot-check | Items that were converted or whose numbers changed, re-checked by the model | Numbers right, meaning wrong |
 
 The spot-check covers only suspicious items, not every line, so it does not noticeably add
 to the run time or the cost.
+
+#### When the number count does not match
+
+Two dimensions in the source, one left in the translation — usually a value was merged or
+dropped. This used to be a mere hint that never blocked anything; in practice a source with
+two dimensions and a translation with three numbers was reported as "review passed", which
+lets a file with a genuinely missing dimension through.
+
+The rule now:
+
+1. The item is **sent back for one retranslation** — most of the time the second attempt is right.
+2. If the count still differs, the file is **not marked as failed** (the count is taken from
+   unit symbols, so an unusual but correct rendering can also mismatch), but the spot is listed
+   in a separate paragraph: "the number of values here does not match the source — please
+   compare against the original".
 
 #### Only the failing items are retranslated
 
@@ -859,7 +875,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.9.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.0.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

@@ -342,6 +342,106 @@ def _int_to_rgb(c):
     return ((c >> 16) & 255) / 255, ((c >> 8) & 255) / 255, (c & 255) / 255
 
 
+def _ink_rect(font, texts, size, origin, angle=0.0):
+    """
+    这一笔字实际会占到的矩形。
+
+    为什么要单独算：擦除和回读都只认原框（TextGroup.rect），但写入是允许
+    适度溢出的 —— 单行最多可以写到框宽的 1.4 倍（FIT_MAX_RATIO），
+    折行时第二行贴着原基线往上叠。按原框擦，上一版溢出的那一截就擦不掉，
+    打回重写时新旧两版叠在一起，页面上留下半截旧词（实测残留过一个 H）；
+    按原框回读，溢出的部分也读不到，写好的会被误判成空白块。
+
+    返回 Rect；算不出来返回 None（调用方按原框处理即可）。
+    """
+    if not texts:
+        return None
+    try:
+        w = max(font.text_length(t or "", fontsize=size) for t in texts)
+    except Exception:
+        return None
+    try:
+        asc = font.ascender * size
+        desc = font.descender * size        # descender 是负值
+    except Exception:
+        asc, desc = size * 0.8, -size * 0.2
+    # 折行的第一行在基线之上 (n-1) 个行距处，占高要一起算进去
+    lift = (len(texts) - 1) * size * WRAP_LINE_LEAD
+    w = max(w, 0.5)
+
+    if abs(angle) < 0.5:
+        return pymupdf.Rect(origin.x, origin.y - asc - lift,
+                            origin.x + w, origin.y - desc)
+
+    # 旋转标注：把四个角绕 origin 转过去，再取包围盒。
+    # 与写入时的 morph=(origin, Matrix(angle)) 是同一个变换，差一个方向都不行。
+    try:
+        m = pymupdf.Matrix(angle)
+    except Exception:
+        return None
+    pts = []
+    for dx, dy in ((0, -asc), (w, -asc), (w, -desc), (0, -desc)):
+        q = pymupdf.Point(dx, dy) * m
+        pts.append(pymupdf.Point(origin.x + q.x, origin.y + q.y))
+    xs = [p.x for p in pts]
+    ys = [p.y for p in pts]
+    return pymupdf.Rect(min(xs), min(ys), max(xs), max(ys))
+
+
+def _erase_rects(page, rects):
+    """
+    按一组矩形擦除文字。用于「上一版写出去的范围比原框大」的情形：
+    erase_text 只吃 TextGroup.rect，覆盖不到溢出部分。
+    """
+    rects = [r for r in rects if r is not None]
+    if not rects:
+        return
+    for r in rects:
+        page.add_redact_annot(pymupdf.Rect(r), fill=None)
+    page.apply_redactions(
+        images=pymupdf.PDF_REDACT_IMAGE_NONE,
+        graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+        text=pymupdf.PDF_REDACT_TEXT_REMOVE,
+    )
+
+
+def _fit_to_width(font, text, base_size, width, floor=3.5):
+    """
+    把字号缩到「整串宽度不超过 width」，且不低于 floor。
+
+    与 fit_font_size 的区别：那个允许 1.25 倍溢出、并有 0.62 的字号下限，
+    用来排正常标注很合适；但单位声明格、说明行这类**必须待在格子里**的位置
+    不能溢出一丝 —— 溢出去压的就是隔壁格子里的字。
+    """
+    if width <= 0 or not text:
+        return base_size
+    try:
+        natural = font.text_length(text, fontsize=base_size)
+    except Exception:
+        return base_size
+    if natural <= 0 or natural <= width:
+        return base_size
+    return max(floor, base_size * width / natural)
+
+
+def _rects_overlap(a, b, pad=0.0):
+    """两个矩形有没有重叠。pad 是允许的贴合余量（格子紧挨着时不算撞上）"""
+    try:
+        return not (a.x1 <= b.x0 + pad or b.x1 <= a.x0 + pad
+                    or a.y1 <= b.y0 + pad or b.y1 <= a.y0 + pad)
+    except AttributeError:
+        return False
+
+
+def _same_rect(a, b, tol=0.6):
+    """两个矩形是不是同一处（避免「自己挡自己」）"""
+    try:
+        return (abs(a.x0 - b.x0) < tol and abs(a.y0 - b.y0) < tol
+                and abs(a.x1 - b.x1) < tol and abs(a.y1 - b.y1) < tol)
+    except AttributeError:
+        return False
+
+
 def fit_font_size(font, text, base_size, max_len, min_scale=0.62, overflow=1.25):
     """
     计算写回字号。
@@ -466,7 +566,13 @@ def plan_group(g, text, obstacles=()):
         # 再往上的空间多半已经越过了表格线，占用会压到别的格子）
         room = min(g.rect.height + _room_above(g.rect, obstacles, 3.0 * g.size),
                    g.rect.height * 2.0 + 2.0)
-        plan = wrap_fit(font, text, g.size, box * 1.1, room)
+        # 折行的可用宽**就是框宽，一点不给余量**。
+        # v1.0.9 这里给的是 box*1.1，想着「折一下总能多挤 10%」，
+        # 实际结果是折出来的两行都超框：擦除只擦到框边，打回重写时
+        # 上一版超出那一截擦不掉，页面残留半截旧词（实测残留过一个 H）；
+        # 复核按框回读也读不到超出的部分。折行的意义本来就是「塞进框里」，
+        # 塞不进就该判写不下、保留原文，而不是硬挤出框外。
+        plan = wrap_fit(font, text, g.size, box, room)
         if plan:
             out["size"], out["lines"] = plan
             return out
@@ -476,7 +582,7 @@ def plan_group(g, text, obstacles=()):
     return out
 
 
-def write_paragraph(page, lines, new_text):
+def write_paragraph(page, lines, new_text, out_layout=None):
     """
     整段译文写回：按原来的行数、每行宽度重新断行，再逐行放回原来的 baseline。
 
@@ -487,6 +593,11 @@ def write_paragraph(page, lines, new_text):
     例外：两三行的「短标签」（例如 ⑥ Lock pin / spring loaded, pull ring），
     中文往往一个短句就说完，硬按原行数拆会把词语劈开（「弹簧加」/「载，带拉环」）。
     这种一律合成一行，字号按最宽那行的空间自适应。
+
+    out_layout 传一个空字典进来，会回填 {"size","parts"}：这次实际排出来的
+    字号和每行落点。打回重写时靠它把上一版写出去的范围一起擦掉 ——
+    段落最后一行会吃下全部剩余文字，可能比原行宽出一截，
+    只擦原框就会留下半截旧词。
     """
     font = font_for(new_text)
 
@@ -504,11 +615,14 @@ def write_paragraph(page, lines, new_text):
                 tw.write_text(page, color=color)
             else:
                 tw.write_text(page, color=color, morph=(g.origin, pymupdf.Matrix(g.angle)))
+            if out_layout is not None:
+                out_layout.update(size=size, parts=[(g, new_text)])
             return (paragraph_mod.join_text(lines), new_text,
                     round(size, 1) != round(g.size, 1))
 
     parts, size = paragraph_mod.fit_paragraph(new_text, lines, font, lines[0].size)
 
+    used = []
     for g, seg in zip(lines, parts):
         if not seg:
             continue
@@ -519,6 +633,10 @@ def write_paragraph(page, lines, new_text):
             tw.write_text(page, color=color)
         else:
             tw.write_text(page, color=color, morph=(g.origin, pymupdf.Matrix(g.angle)))
+        used.append((g, seg))
+
+    if out_layout is not None:
+        out_layout.update(size=size, parts=used)
 
     return (paragraph_mod.join_text(lines), new_text,
             round(size, 1) != round(lines[0].size, 1))
@@ -627,6 +745,9 @@ def write_groups(page, entries, obstacles=None, plans=None, skipped=None):
                               morph=(g.origin, pymupdf.Matrix(g.angle)))
 
         report.append((g.text, new_text, round(size, 1) != round(g.size, 1)))
+        # 记下实际占到的范围，交给调用方登记（打回重写时要按它擦、
+        # 复核要按它回读）。算不准就留空，调用方退回按原框处理。
+        it["ink"] = _ink_rect(font, lines or [new_text], size, g.origin, g.angle)
     return report
 
 
@@ -693,7 +814,8 @@ def is_decl_note(text):
     return bool(_DECL_NOTE_RE.search(s))
 
 
-def write_unit_decl(page, g, src_text, mode=UNIT_METRIC, doc_lang="zh"):
+def write_unit_decl(page, g, src_text, mode=UNIT_METRIC, doc_lang="zh",
+                    obstacles=(), out_layout=None):
     """
     改写单位声明格：第一行写新单位，第二行小字注明原单位和已换算。
 
@@ -709,6 +831,20 @@ def write_unit_decl(page, g, src_text, mode=UNIT_METRIC, doc_lang="zh"):
     收图的人一个字都看不懂；反过来英文界面的用户出中文图也一样。
     非中文的目标语（日/德/法…）一律用英文 —— 这些语言没有词表，
     写中文更看不懂，英文至少是图纸的通用语。
+
+    v1.1.0 起三条硬规矩（都是实测踩出来的）：
+
+      1. **主行不许超出格宽**。原来用 fit_font_size，它有 0.62 的字号下限，
+         24pt 宽的格子里写 19 个字符的说明行，缩到底还有 35.9pt 宽 ——
+         横向压到隔壁格子上。
+      2. **说明行放不下就不写**。宁可只写「mm」少一句注解，也不能把字压到
+         隔壁格子；标题栏的格子是紧挨着的，溢出必然盖住别人的字。
+      3. **写完要能被复核读回来**。这个函数原来不返回任何位置信息，
+         复核完全看不到这一格 —— 擦错了、写空了都没人知道。
+         现在把实际写入的两个框交出去，主流程据此登记回读。
+
+    out_layout 传空字典进来会回填 {"main","note","rects"}：
+    主行文字、说明行文字（没写就是 None）、这次实际占到的矩形列表。
     """
     if (doc_lang or "zh") == "zh":
         main, note = ("英寸", "原图毫米，已换算") if mode == UNIT_IMPERIAL \
@@ -719,26 +855,61 @@ def write_unit_decl(page, g, src_text, mode=UNIT_METRIC, doc_lang="zh"):
 
     font = font_for(main)
     color = _int_to_rgb(g.color)
+    box = max(g.rect.width, 0.1)
 
-    # 主行：宽度按格子自适应，但不放大超过原字号
-    size = min(g.size, fit_font_size(font, main, g.size, g.rect.width))
+    # 主行：严格缩到格宽以内，绝不外溢
+    size = min(g.size, _fit_to_width(font, main, g.size, box))
     tw = pymupdf.TextWriter(page.rect)
     tw.append(g.origin, main, font=font, fontsize=size)
     tw.write_text(page, color=color)
+    rects = []
+    ink = _ink_rect(font, [main], size, g.origin, g.angle)
+    if ink is not None:
+        rects.append(ink)
 
-    # 说明行：紧跟主行下方，字号 0.55 倍（下限 4.5pt，再小就印不出来）
+    # ---- 说明行：三道关都过才写 ----
+    note_written = None
     nfont = font_for(note)
     nsize = max(4.5, size * 0.55)
-    # 放不下就把说明行缩到格子宽度以内
-    nsize = min(nsize, fit_font_size(nfont, note, nsize, g.rect.width))
-    norg = pymupdf.Point(g.origin.x, g.rect.y1 + nsize * 0.85)
-    tw2 = pymupdf.TextWriter(page.rect)
-    tw2.append(norg, note, font=nfont, fontsize=nsize)
-    tw2.write_text(page, color=color)
+    nsize = _fit_to_width(nfont, note, nsize, box, floor=4.0)
+    wide_enough = nfont.text_length(note, fontsize=nsize) <= box + 0.5
+
+    # 第一道：宽度得进得了格子。4pt 是印刷下限，再小等于没写
+    if wide_enough and nsize >= 4.0:
+        # 第二道：垂直方向得有空位。格高够就写在格内第二行（最稳），
+        # 否则只能往格下方借一行 —— 但下方紧挨着别的格子时不许借。
+        inside_room = g.rect.height >= size + nsize * 1.15
+        if inside_room:
+            norg = pymupdf.Point(g.origin.x, g.rect.y1 - nsize * 0.28)
+        else:
+            norg = pymupdf.Point(g.origin.x, g.rect.y1 + nsize * 0.85)
+            # 第三道：下方这一条横带上有没有别人的字
+            band = pymupdf.Rect(g.rect.x0, g.rect.y1 - 0.5,
+                                g.rect.x1, norg.y + nsize * 0.35)
+            if any(_rects_overlap(band, r) for r in obstacles
+                   if r is not None and not _same_rect(r, g.rect)):
+                norg = None
+        if norg is not None:
+            tw2 = pymupdf.TextWriter(page.rect)
+            tw2.append(norg, note, font=nfont, fontsize=nsize)
+            tw2.write_text(page, color=color)
+            note_written = note
+            nink = _ink_rect(nfont, [note], nsize, norg, 0.0)
+            if nink is not None:
+                rects.append(nink)
+
+    if out_layout is not None:
+        out_layout.update(main=main, note=note_written, rects=rects,
+                          width_ok=wide_enough)
 
     # 清单回执里的括号跟界面语言走：父级登记的是给人看的报表行，
-    # 一份英文清单里夹一对全角括号（），排版上很扎眼
-    pair = (f"{main} ({note})" if i18n.is_en() else f"{main}（{note}）")
+    # 一份英文清单里夹一对全角括号（），排版上很扎眼。
+    # 没写上说明行的时候只回执主单位 —— 回执里写着「mm（已换算说明）」
+    # 而图上其实没有那行注解，用户对照原图会找不到。
+    if note_written:
+        pair = (f"{main} ({note})" if i18n.is_en() else f"{main}（{note}）")
+    else:
+        pair = main
     return (i18n.T("单位声明"), src_text, pair)
 
 
@@ -760,15 +931,20 @@ _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 # 标注版要认的单位，跟着输出单位走：
 # 公制模式标 104.78mm / 11.34kg，英制模式标 4-1/8" / 11.34 lb。
 # 认错了就会出现「黄块画在数字上、单位却是另一种」的怪图。
+#
+# 中文单位必须一起认：中文产出的译文里写「100 毫米」很常见，
+# 只认 mm/kg 的话这些数一个都标不上 —— 标注版是拿去下料对照的，
+# 漏标比标错更危险（看着全绿，实际一半没标）。
 _MARK_UNIT_RE = {
-    UNIT_METRIC: re.compile(r"(?:mm|kg)", re.I),
-    UNIT_IMPERIAL: re.compile(r'(?:"|″|”|lb)', re.I),
+    UNIT_METRIC: re.compile(r"(?:mm|kg|毫米|千克|公斤)", re.I),
+    UNIT_IMPERIAL: re.compile(r'(?:"|″|”|lb|lbs|英寸|磅)', re.I),
 }
 
 
 def _num_unit_re(mode):
     """「数值 + 目标单位」的匹配式。范围写法的前一个数也要跟着抓"""
-    unit = r'(?:[\"″”]|lb|lbs)' if mode == UNIT_IMPERIAL else r"(?:mm|kg)"
+    unit = (r'(?:[\"″”]|lbs?|英寸|磅)' if mode == UNIT_IMPERIAL
+            else r"(?:mm|kg|毫米|千克|公斤)")
     return re.compile(
         r"\d[\d,]*(?:\.\d+)?(?:\s*[–—~～-]\s*\d[\d,]*(?:\.\d+)?)?\s*" + unit, re.I)
 
@@ -802,11 +978,37 @@ def paint_metric_marks(doc, converted_texts, mode=UNIT_METRIC):
         if not want:
             continue
 
+        # 先按「行」判定哪些行里有换算结果。
+        #
+        # 为什么加这一道：中文写法的单位（100 毫米）会被排版切成两个词，
+        # 「100」和「毫米」各是一个词 —— 逐个词找「既含单位又含数值」
+        # 一个都匹配不上，整页标不出一处。这是中文产出时标注版的通病：
+        # 看着没报错，实际上黄块一个都没画。
+        # 行级判定把这两个词重新拼回一句，再落回单词的 bbox 上去标，
+        # 位置仍然是准的，观感不变。
+        ok_lines = set()
+        try:
+            for blk in page.get_text("dict").get("blocks", []):
+                if blk.get("type") != 0:
+                    continue
+                bno = blk.get("number")
+                for ln in blk.get("lines", []):
+                    line_text = "".join(sp.get("text", "")
+                                        for sp in ln.get("spans", []))
+                    if not unit_re.search(line_text):
+                        continue
+                    if any(n in want for n in _NUM_RE.findall(line_text)):
+                        ok_lines.add((bno, ln.get("number")))
+        except Exception:
+            ok_lines = set()
+
         for w in page.get_text("words"):
             token = w[4].strip().rstrip(",.;:，。；：")
             # 只有含目标单位的词才可能是换算结果，
-            # 这一条同时挡住了「数量 2」「角度 38」这类纯数字被误标
-            if not unit_re.search(token):
+            # 这一条同时挡住了「数量 2」「角度 38」这类纯数字被误标。
+            # 中文两词分写的情况走上面的行级门禁，这里放宽。
+            on_marked_line = (w[5], w[6]) in ok_lines if len(w) > 6 else False
+            if not unit_re.search(token) and not on_marked_line:
                 continue
             # R88.90mm / Ø12.70mm / 0.363–0.454kg 这类，只要词里有任意一个
             # 换算出来的数值就整词标黄（和人工用荧光笔划一下的习惯一致）
@@ -900,22 +1102,30 @@ _MAX_REVIEW_ROUNDS = 3
 
 def _metric_items(hint_obj):
     """
-    把换算账本拆成「确凿疑点」和「启发式提示」两组，供复核使用。
+    把换算账本拆成三组，供复核使用：
 
-    确凿的（warn）要带上页码和原文：复核要靠这两样把问题配对到
+      warn    确凿疑点（数值与复算不符、原文数值在译文里找不到）
+      soft    可查证但没定论（同一句里数值个数对不上，可能有数值被合并/漏算）
+      notice  纯启发式提示（数量不对但配不到具体位置等）
+
+    warn / soft 都要带上页码和原文：复核靠这两样把问题配对到
     「能重写这一条」的登记记录上，配上了才能打回重译。
+
+    soft 这一档是 v1.1.0 加的。以前它和普通提示混在一起「只提示、不处理」，
+    结果原文两个尺寸、译文给三个数也能判「复核通过」—— 那已经不是误报问题，
+    是把真丢数的文件放过去了。现在给它一次重译机会，但不阻断出图。
     """
-    warn, notice, seen = [], [], set()
+    warn, soft, notice, seen = [], [], [], set()
     ledger = getattr(hint_obj, "metric_report", None)
     for item in (getattr(ledger, "issues", None) or []):
         try:
             level, pno, s_txt, o_txt, detail = item
         except (TypeError, ValueError):
             continue
+        key = (pno, re.sub(r"\s+", "", s_txt or ""))
         if level == "warn":
             # 同一条被反复校验（每轮重译都会重算）时会重复入账，
             # 只留最后一次 —— 前几次的复算结果已经被后来的覆盖了
-            key = (pno, re.sub(r"\s+", "", s_txt or ""))
             if key in seen:
                 warn = [w for w in warn if w["_k"] != key]
             seen.add(key)
@@ -923,11 +1133,14 @@ def _metric_items(hint_obj):
                          "text": f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"})
         elif level == "notice":
             text = f"第 {pno or '?'} 页 {s_txt} → {o_txt}：{detail}"
-            if text not in notice:
-                notice.append(text)
+            if key in seen:
+                continue
+            seen.add(key)
+            soft.append({"page": pno, "src": s_txt, "text": text,
+                         "detail": detail})
     for w in warn:
         w.pop("_k", None)
-    return warn, notice
+    return warn, soft, notice
 
 
 def _rewrite_record(doc, rec, new_text):
@@ -936,10 +1149,15 @@ def _rewrite_record(doc, rec, new_text):
 
     三条写入路径各自沿用原来的函数，不另写一套排版：
     文字层单个标注走 write_groups，整段说明走 write_paragraph，
-    位图里的字走 image_text.rewrite_one。
+    位图里的字走 image_text.rewrite_one，单位声明格走 write_unit_decl。
 
     重写前一律先擦。擦除是幂等的 —— 同一块再擦一次只是把上一版写的
     译文也擦掉，不擦的话新旧两版字会叠在一起，看着比空白更糟。
+
+    **擦的范围要按上一版实际写到的位置**（rec["ink"]），不是原框。
+    v1.0.9 只擦原框，而写入是允许溢出的（单行到 1.4 倍框宽、折行第二行往上叠、
+    段落最后一行吃下剩余文字），溢出的那一截擦不掉 —— 重写后页面上就留着
+    上一版的半截旧词，实测残留过一个 H。
     """
     try:
         page = doc[rec["page"] - 1]
@@ -948,12 +1166,34 @@ def _rewrite_record(doc, rec, new_text):
     obj = rec.get("obj")
     if obj is None:
         return False
+
+    # 上一版写出去的全部范围：原框 + 实际字形框
+    stale = [r for r in (rec.get("rect"),) + tuple(rec.get("ink") or ())
+             if r is not None]
     try:
         if rec.get("kind") == "image":
             return image_text.rewrite_one(page, obj, new_text)
+        if rec.get("kind") == "decl":
+            # 声明格没有「翻译」可重做，重写就是按同一套规则再写一遍。
+            # 它被打回的唯一原因是「格子里读不到字」，重写一次通常就好了。
+            _erase_rects(page, stale)
+            write_unit_decl(page, obj, rec.get("src") or "", 
+                            rec.get("mode") or UNIT_METRIC,
+                            rec.get("doc_lang") or "zh")
+            return True
         if rec.get("kind") == "para":
-            erase_text(page, obj)
-            write_paragraph(page, obj, new_text)
+            _erase_rects(page, stale)
+            lay = {}
+            write_paragraph(page, obj, new_text, out_layout=lay)
+            inks = [r for r in (rec.get("rect"),) if r is not None]
+            for g, seg in (lay.get("parts") or []):
+                ir = _ink_rect(font_for(seg), [seg],
+                               lay.get("size") or g.size, g.origin, g.angle)
+                if ir is not None:
+                    inks.append(ir)
+            rec["ink"] = inks
+            if rec.get("mark") is not None:
+                rec["mark"]["ink"] = inks
             return True
         # 单条标注：**先算能不能写进去，再决定动不动手**。
         # 顺序反了就是一块白斑 —— 擦完才发现新译文还是塞不下，
@@ -961,8 +1201,14 @@ def _rewrite_record(doc, rec, new_text):
         plan = plan_group(obj, new_text, text_obstacles(page, [obj.rect]))
         if not plan["fits"]:
             return False
-        erase_text(page, [obj])
+        _erase_rects(page, stale)
         write_groups(page, [(obj, new_text)], plans=[plan])
+        # 新的一版占到的范围要写回登记表：下一轮再打回时擦的是这一版，
+        # 不是最早那一版 —— 用旧的 ink 擦会漏掉这一版新溢出的部分
+        new_ink = [r for r in (obj.rect, plan.get("ink")) if r is not None]
+        rec["ink"] = new_ink
+        if rec.get("mark") is not None:
+            rec["mark"]["ink"] = new_ink
         return True
     except Exception:
         return False
@@ -1014,6 +1260,35 @@ def _retry_feedback(rec, issue, round_no):
     return msg
 
 
+def _drop_metric(owner, page, src):
+    """
+    把账本里这一条的旧记录清掉。
+
+    为什么必须清：账本只追加不覆盖。一条译文第一次算错、被复核打回、
+    重译后算对了 —— 但如果不清旧账，下一轮复核仍然按「第一次算错」报同一处，
+    于是再打回一次、再翻一遍，最后报告里还挂着一条早就修好的「数值可疑」。
+    实测就是这么空转的：页面已经是正确的 1270.00 mm，报告仍判数值不符。
+    """
+    ledger = getattr(owner, "metric_report", None)
+    if ledger is None:
+        return
+    drop = getattr(ledger, "drop", None)
+    if callable(drop):
+        try:
+            drop(page, src)
+            return
+        except Exception:
+            pass
+    # 账本没实现 drop 时的兜底：按 (页码, 去空白原文) 手工过滤
+    try:
+        key = (int(page or 0), re.sub(r"\s+", "", src or ""))
+        ledger.issues = [it for it in ledger.issues
+                         if (it[0] == "fix"
+                             or (int(it[1] or 0), re.sub(r"\s+", "", it[2] or "")) != key)]
+    except Exception:
+        pass
+
+
 def _retry_batch(doc, targets, retranslate, round_no, marks):
     """
     执行一轮定向重译：只重翻被复核打回的那几条，返回真正写成多少条。
@@ -1021,38 +1296,69 @@ def _retry_batch(doc, targets, retranslate, round_no, marks):
     写成后要把「回读校验的期望文本」一起换掉（rec["mark"]["out"]），
     否则下一轮复核还拿着旧译文去页面上找，永远判空白 —— 这是重试
     最容易踩的坑：明明写好了，报告里还是一片空白块。
+
+    v1.1.0 起按页分组调用：账本里记的页码来自 translator.page_no，
+    整批混在一起发的话，第 7 页的问题会被记到最后一页上，复核再想配对
+    就打回不动。分组之后每页的账目各自对准。
     """
-    items = []
+    owner = getattr(retranslate, "__self__", None)
+    by_page = {}
     for rec, issue in targets:
-        src = rec.get("src") or ""
-        items.append((src, rec.get("lang") or detect_lang(src),
-                      _retry_feedback(rec, issue, round_no)))
-    try:
-        outs = retranslate(items)
-    except Exception:
-        return 0
-    if not outs:
-        return 0
+        by_page.setdefault(rec.get("page") or 0, []).append((rec, issue))
 
     written = 0
-    for (rec, _issue), new in zip(targets, outs):
-        if not new or not str(new).strip():
+    for pno, group in by_page.items():
+        # 单位声明格没有「翻译」可重做：它写的不是译文，是「毫米 / 原图英寸已换算」
+        # 这种固定说明。送进翻译接口只会把它再翻一遍，白白花一次调用，
+        # 而且回来的是另一种语言 —— 直接按原样重写一遍即可。
+        plain = []
+        for rec, _issue in group:
+            if rec.get("kind") == "decl":
+                if _rewrite_record(doc, rec, rec.get("out") or ""):
+                    written += 1
+                continue
+            plain.append((rec, _issue))
+        if not plain:
             continue
-        new = str(new).strip()
-        if new == (rec.get("out") or "").strip():
-            # 模型给了与上一版一字不差的译文，再重试也是同一句，别浪费轮次
+
+        if owner is not None and pno:
+            try:
+                owner.page_no = pno
+            except Exception:
+                pass
+        items = []
+        for rec, issue in plain:
+            src = rec.get("src") or ""
+            items.append((src, rec.get("lang") or detect_lang(src),
+                          _retry_feedback(rec, issue, round_no)))
+        try:
+            outs = retranslate(items)
+        except Exception:
             continue
-        if not _rewrite_record(doc, rec, new):
+        if not outs:
             continue
-        rec["out"] = new
-        mark = rec.get("mark")
-        if mark is not None:
-            mark["out"] = new
-        else:
-            marks.append({"page": rec.get("page"), "rect": rec.get("rect"),
-                          "out": new, "src": rec.get("src")})
-            rec["mark"] = marks[-1]
-        written += 1
+
+        for (rec, _issue), new in zip(plain, outs):
+            if not new or not str(new).strip():
+                continue
+            new = str(new).strip()
+            if new == (rec.get("out") or "").strip():
+                # 模型给了与上一版一字不差的译文，再重试也是同一句，别浪费轮次
+                continue
+            if not _rewrite_record(doc, rec, new):
+                continue
+            rec["out"] = new
+            mark = rec.get("mark")
+            if mark is not None:
+                mark["out"] = new
+            else:
+                marks.append({"page": rec.get("page"), "rect": rec.get("rect"),
+                              "out": new, "src": rec.get("src")})
+                rec["mark"] = marks[-1]
+            # 这一条已经重算并通过，账本里的旧账必须清掉，
+            # 否则下一轮还按上一版报同一处（见 _drop_metric）
+            _drop_metric(owner, rec.get("page"), rec.get("src"))
+            written += 1
     return written
 
 
@@ -1062,11 +1368,19 @@ def _prune_untranslated(stat, fixes):
 
     不划掉的话，下一轮复核还按「这条没译出来」报残留，
     于是又被打回一次、又翻一遍 —— 白烧两轮额度才收敛。
+
+    **必须按「同一处全部写成」才算划掉**。v1.0.9 是按 (页码, 原文) 划的，
+    而一页上完全可能有两处一模一样的文字（两个 DOOR PANEL）：一处框宽写成了、
+    另一处框窄没写成，结果写成那处的记录把没写成那处的未译条目一起划掉了 ——
+    清单里写「全部译出」，图上还留着一处英文原文，复核也查不出来
+    （目标中文时不做文字层残留扫描）。
     """
-    done = set()
+    groups = {}
     for rec in fixes:
-        if rec.get("out"):
-            done.add(review_mod.fix_key(rec.get("page"), rec.get("src")))
+        key = review_mod.fix_key(rec.get("page"), rec.get("src"))
+        groups.setdefault(key, []).append(rec)
+    done = {k for k, recs in groups.items()
+            if recs and all(r.get("out") for r in recs)}
     if not done:
         return
     stat["untranslated"] = [
@@ -1105,23 +1419,29 @@ def _review_with_retries(doc, marks, stat, fixes, hint_obj, dst_hint,
 
     while True:
         round_no += 1
-        warn_items, notice_items = _metric_items(hint_obj)
+        warn_items, soft_items, notice_items = _metric_items(hint_obj)
         rep = review_mod.review_document(
             doc, marks, dst_hint or i18n.get_lang(),
             untranslated=stat.get("untranslated"),
             metric_issues=warn_items,
-            metric_notes=notice_items,
+            metric_notes=soft_items,
             translator=hint_obj, fixmap=fixmap,
             round_no=round_no, retried=retried)
 
-        if not rep.blocking:
+        targets = rep.retry_targets()
+        # 「通过」的判据从「没有硬错误」改成「没有硬错误、也没有可重译的存疑」。
+        # 只按前者的话，soft（数值个数对不上）会当场放行 —— 那正是
+        # 「原文两个尺寸、译文三个数也判通过」的老毛病。
+        if not rep.blocking and not targets:
             history.append(f"第 {round_no} 轮：通过")
             break
-
-        targets = rep.retry_targets()
-        history.append(f"第 {round_no} 轮：{len(rep.issues)} 处问题"
-                       + (f"，可重译 {len(targets)} 处" if targets
-                          else "，无法自动修复"))
+        if not rep.blocking:
+            history.append(f"第 {round_no} 轮：{len(rep.soft)} 处数值待核"
+                           f"，可重译 {len(targets)} 处")
+        else:
+            history.append(f"第 {round_no} 轮：{len(rep.issues)} 处问题"
+                           + (f"，可重译 {len(targets)} 处" if targets
+                              else "，无法自动修复"))
 
         # 三条停手条件，缺一条就会无限循环烧额度
         if not targets:
@@ -1214,7 +1534,8 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
     total = len(doc)
     all_report = []
     stat = {"targets": 0, "translated": 0, "untranslated": [], "image_texts": 0,
-            "paragraphs": 0, "unit_decl_fixed": 0, "metric_marks": 0}
+            "paragraphs": 0, "unit_decl_fixed": 0, "unit_decl_nonote": 0,
+            "metric_marks": 0}
     # 写入记录 [{page, rect, out, src}]，供输出前的复核回读校验。
     # 擦除是不可逆的，只有写完再读回来才能证明「这里没有被擦成空白」。
     marks = []
@@ -1390,9 +1711,13 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             # 擦了才发现塞不下，原位就留一块空白，比「这里没翻译」糟得多 ——
             # 空白要等客户翻到那一页才发现，保留原文至少字还在。   
             single_plans = []
-            if single_entries:
+            obst = []
+            if single_entries or decl_entries:
+                # 障碍要在**擦除之前**取：擦完页面上的原文字就没了，
+                # 判断「说明行下方有没有别人的字」得看擦之前的样子
                 obst = text_obstacles(
                     page, [g.rect for g, _t, _s, _l, _k in single_entries])
+            if single_entries:
                 for g, txt, src, lang, k in single_entries:
                     p = plan_group(g, txt, obst)
                     if not p["fits"]:
@@ -1410,62 +1735,96 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                         continue
                     p["src"], p["lang"], p["kind"] = src, lang, k
                     single_plans.append(p)
-                single_entries = [(p["g"], p["text"], p["src"], p["lang"], p["kind"])
-                                  for p in single_plans]
 
-            if para_entries or single_entries or decl_entries or stale_entries:
+            if para_entries or single_plans or decl_entries or stale_entries:
                 # 先擦后写，顺序不能反
                 to_erase = []
                 for p, _t, _s, _l in para_entries:
                     to_erase.extend(p)
-                for g, _t, _s, _l, _k in single_entries:
-                    to_erase.append(g)
+                for it in single_plans:
+                    to_erase.append(it["g"])
                 for g, _ in decl_entries:
                     to_erase.append(g)
                 to_erase.extend(stale_entries)
                 erase_text(page, to_erase)
 
                 for p, txt, src, lang in para_entries:
-                    all_report.append((page_no + 1,) + write_paragraph(page, p, txt))
+                    lay = {}
+                    all_report.append((page_no + 1,) +
+                                      write_paragraph(page, p, txt, out_layout=lay))
                     stat["translated"] += 1
                     # 整段占的是一组行，取并集当作回读区域
                     pr = pymupdf.Rect(p[0].rect)
                     for ln in p[1:]:
                         pr |= ln.rect
-                    mark = {"page": page_no + 1, "rect": pr,
+                    # 段落最后一行会吃下全部剩余文字，可能比原来那行宽出一截。
+                    # 回读和日后重写的擦除都要按**实际写到**的范围来，
+                    # 只按原框会漏掉溢出的那一截（重写时新旧叠字、回读判空白）。
+                    inks = [pr]
+                    for g, seg in (lay.get("parts") or []):
+                        ir = _ink_rect(font_for(seg), [seg],
+                                       lay.get("size") or g.size,
+                                       g.origin, g.angle)
+                        if ir is not None:
+                            inks.append(ir)
+                    mark = {"page": page_no + 1, "rect": pr, "ink": inks,
                             "out": txt, "src": src}
                     marks.append(mark)
                     fixes.append({"page": page_no + 1, "kind": "para", "obj": p,
                                   "src": src, "rect": pr, "out": txt,
-                                  "lang": lang, "mark": mark})
+                                  "lang": lang, "mark": mark, "ink": inks})
 
-                if single_entries:
+                if single_plans:
                     # 排版结果直接传进去：这一步刚算过，重算一遍既慢，
                     # 又可能因为页面已经擦过而算出不同的可用空间
                     page_report = write_groups(
-                        page, [(g, txt) for g, txt, _s, _l, _k in single_entries],
+                        page, [(it["g"], it["text"]) for it in single_plans],
                         plans=single_plans)
                     all_report.extend((page_no + 1,) + r for r in page_report)
                     stat["translated"] += len(page_report)
-                    for g, txt, src, lang, k in single_entries:
-                        mark = {"page": page_no + 1, "rect": g.rect,
+                    for it in single_plans:
+                        g, txt, src = it["g"], it["text"], it["src"]
+                        # 实际占到哪儿：原框 + 这一版写出去的字形范围。
+                        # write_groups 已经把 ink 算在 plan 上了（它知道最终字号）
+                        inks = [r for r in (g.rect, it.get("ink")) if r is not None]
+                        mark = {"page": page_no + 1, "rect": g.rect, "ink": inks,
                                 "out": txt, "src": src}
                         marks.append(mark)
                         # 纯尺寸标注不登记重译：那条译文是本地按原文换算出来的，
                         # 复算不符说明换算规则本身有问题，重翻只会得到同一个数。
-                        if k == "size":
+                        if it["kind"] == "size":
                             continue
                         fixes.append({"page": page_no + 1, "kind": "single",
                                       "obj": g, "src": src, "rect": g.rect,
-                                      "out": txt, "lang": lang, "mark": mark})
+                                      "out": txt, "lang": it["lang"], "mark": mark,
+                                      "ink": inks, "size": it.get("size"),
+                                      "lines": it.get("lines")})
 
                 for g, src in decl_entries:
-                    all_report.append((page_no + 1,) +
-                                      write_unit_decl(page, g, src, unit_mode, doc_lang))
+                    lay = {}
+                    all_report.append((page_no + 1,) + write_unit_decl(
+                        page, g, src, unit_mode, doc_lang,
+                        obstacles=obst, out_layout=lay))
                     stat["unit_decl_fixed"] += 1
+                    if not lay.get("note"):
+                        # 格子太窄，说明行放不进去 —— 只写了单位本身。
+                        # 要单独计数：界面那句「并注明原图英寸已换算」
+                        # 对这种格子是不成立的，得如实说少写了注
+                        stat["unit_decl_nonote"] += 1
+                    # 声明格也要登记：不登记的话复核根本看不见这一格，
+                    # 写空了、被后面的操作擦掉了都没人知道（v1.0.9 就是这样）
+                    rects = lay.get("rects") or [g.rect]
+                    mark = {"page": page_no + 1, "rect": g.rect, "ink": rects,
+                            "out": lay.get("main") or "", "src": src}
+                    marks.append(mark)
+                    fixes.append({"page": page_no + 1, "kind": "decl", "obj": g,
+                                  "src": src, "rect": g.rect,
+                                  "out": lay.get("main"), "lang": "none",
+                                  "mark": mark, "ink": rects,
+                                  "mode": unit_mode, "doc_lang": doc_lang})
 
                 if progress:
-                    total_w = len(para_entries) + len(single_entries) + len(decl_entries)
+                    total_w = len(para_entries) + len(single_plans) + len(decl_entries)
                     progress(page_no + 1, total,
                              f"第 {page_no + 1}/{total} 页：写入 {total_w} 处译文")
 

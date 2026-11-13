@@ -36,6 +36,8 @@ v1.0.8 起，复核不再只是「过 / 不过」的开关，而是流程里的�
 """
 import re
 
+import pymupdf
+
 # 判定为「空白块」时，回读原文框要外扩多少点。
 # 字写进去时可能因为缩字号略高于原框，取大了会把邻行的字误当成自己的，取小了
 # 又会把「字确实写了、只是偏了一点」误判成空白。2pt 是实测能分开的量。
@@ -108,7 +110,7 @@ class Issue:
 
     def __init__(self, page, kind, text, detail, src=None, localized=True):
         self.page = page          # 1 起的页码，0 表示整份文件层面
-        self.kind = kind          # blank / residue / coverage / number / ai
+        self.kind = kind          # blank / residue / coverage / number / ai / soft
         self.text = text          # 涉及的截图文字（给人看）
         self.detail = detail      # 给人看的说明
         self.src = src if src is not None else (text or "")   # 原文，配对用
@@ -117,7 +119,18 @@ class Issue:
 
     @property
     def category(self):
-        """retry / tolerable / fatal，见模块顶部说明"""
+        """
+        retry / soft / tolerable / fatal，见模块顶部说明。
+
+        soft 是 v1.1.0 加的一档：**可疑但不确凿**，最典型的是「同一句里
+        数值个数对不上」—— 原文两个尺寸、译文只剩一个，多半是真丢了数，
+        但也可能是 50*100*3mm 这种写法被数错。这类不该阻断出图（误报太多），
+        可也不该像以前那样永久放行：放行等于默认它是对的。
+        现在按「打回重译一次、但不计入未解决」处理 —— 多花一次调用，
+        换掉一批真正漏数的文件。
+        """
+        if self.kind == "soft":
+            return "soft"
         if self.refs:
             return "retry"
         if self.kind == "residue" and not self.localized:
@@ -135,6 +148,7 @@ class Issue:
             "coverage": "没有译文",
             "number": "数值可疑",
             "ai": "语义可疑",
+            "soft": "需核对",
         }.get(self.kind, self.kind)
         return f"  {where} · {head}：{self.text}　—　{self.detail}"
 
@@ -201,13 +215,21 @@ class ReviewReport:
 
         tolerable 也不算「干净」：印章、水印没处理就是没处理，
         文件照出，但清单里得有它。
+
+        soft 不算：那类是可疑不可证（数值个数对不上），打回重译过一次就够了，
+        不该因为一处分不清真假的疑点把整份文件标成未通过。
         """
-        return any(it.category != "tolerable" for it in self.issues)
+        return any(it.category not in ("tolerable", "soft") for it in self.issues)
 
     @property
     def tolerable(self):
         """只能提示、改不动的那批（印章 / 水印 / 无法定位的碎片）"""
         return [it for it in self.issues if it.category == "tolerable"]
+
+    @property
+    def soft(self):
+        """可疑但没定论、已经重译过一轮的那批（数值个数对不上等）"""
+        return [it for it in self.issues if it.category == "soft"]
 
     def retry_targets(self):
         """
@@ -243,10 +265,16 @@ class ReviewReport:
             tol = self.tolerable
             if tol:
                 base += f" · 另有 {len(tol)} 处无法定位的残留（见下）"
+            soft = self.soft
+            if soft:
+                # 这类已经重译过一轮，但复算还是对不上个数 —— 不能声称干净，
+                # 也不能当成错误，只能说清楚「这几处自己看一眼」
+                base += f" · {len(soft)} 处数值个数待核（已重译，见下）"
             return base
         by = self.count_by_kind()
         names = {"blank": "空白块", "residue": "原文未处理",
-                 "coverage": "整页无译文", "number": "数值可疑", "ai": "语义可疑"}
+                 "coverage": "整页无译文", "number": "数值可疑",
+                 "ai": "语义可疑", "soft": "数值个数待核"}
         parts = " · ".join(f"{names.get(k, k)} {v} 处" for k, v in by.items())
         # 「已出图」必须写在前面：v1.0.9 起复核不再拦文件，
         # 只报「未通过」会让人以为白跑一趟，其实文件已经在文件夹里了
@@ -279,6 +307,14 @@ class ReviewReport:
             if tol:
                 out.append("")
                 out.extend(tol)
+            soft = self.soft
+            if soft:
+                out.append("")
+                out.append("以下位置的数值个数与原文对不上（可能被合并或漏算），"
+                           "已重译过一次仍如此，请对着原图核一眼：")
+                out.extend(it.line() for it in soft[:20])
+                if len(soft) > 20:
+                    out.append(f"  ……另有 {len(soft) - 20} 处未列出")
             if self.notes:
                 out.append("")
                 out.append("参考提示（不影响出文件，建议顺带核对）：")
@@ -320,6 +356,9 @@ def _mark_parts(m):
     """
     写入记录取值。v1.0.8 起记录改成字典（要带上原文和登记对象才能重写），
     这里保留元组分支，免得旧的自检脚本和外部调用直接崩。
+
+    返回 (页码, 主框, 译文, 原文)。主框只是兜底，实际回读范围看 mark["ink"]
+    （见 _read_rects）—— 写到框外的那一截也得读得到。
     """
     if isinstance(m, dict):
         return (m.get("page"), m.get("rect"), m.get("out"), m.get("src"))
@@ -327,6 +366,32 @@ def _mark_parts(m):
         return (m[0], m[1], m[2], None)
     except (TypeError, IndexError):
         return (None, None, None, None)
+
+
+def _read_rects(mark, rect, pad=_READ_PAD):
+    """
+    这一处该按哪些范围回读。
+
+    只按原框读会漏判：折行时第二行贴着原基线往上叠，第一行可能整个落在
+    原框上方；允许溢出的单行也能写到框宽 1.4 倍处；段落最后一行会吃下
+    全部剩余文字。这些位置都算「写上了」，按原框读却读不到 ——
+    写好的被判成空白块，打回重译三轮也修不好，纯属空转。
+
+    mark["ink"] 是写入时记下的实际字形框（见 pdf_engine._ink_rect）。
+    旧格式的记录没有它，退回原框外扩。
+    """
+    out = []
+    for r in (mark.get("ink") or []) if isinstance(mark, dict) else []:
+        try:
+            out.append(pymupdf.Rect(r) + (-pad, -pad, pad, pad))
+        except Exception:
+            continue
+    if not out and rect is not None:
+        try:
+            out.append(pymupdf.Rect(rect) + (-pad, -pad, pad, pad))
+        except Exception:
+            pass
+    return out
 
 
 def review_document(doc, marks, dst_lang, untranslated=None,
@@ -368,11 +433,15 @@ def review_document(doc, marks, dst_lang, untranslated=None,
         if not frag:
             continue
         rep.checked_writes += 1
-        try:
-            clip = rect + (-_READ_PAD, -_READ_PAD, _READ_PAD, _READ_PAD)
-            got = doc[pno - 1].get_text("text", clip=clip)
-        except Exception:
-            continue
+        # 按「实际写到的范围」逐块读，任一块读得到就算写上（见 _read_rects）
+        got = ""
+        for clip in _read_rects(m, rect):
+            try:
+                got += doc[pno - 1].get_text("text", clip=clip)
+            except Exception:
+                continue
+            if frag in _norm(got):
+                break
         if frag not in _norm(got):
             rep.add(pno, "blank", expected[:40],
                     "原位没有读回译文，可能是被擦成空白或字太小没写进去",
@@ -455,9 +524,26 @@ def review_document(doc, marks, dst_lang, untranslated=None,
             rep.add(0, "number", str(item), "换算后的数值与原文复算结果对不上")
     # 启发式的那些只当提示：它们误报不少（见 MetricReport 的 noticed 说明），
     # 拿它们拦文件会把正确译文一起卡住。
+    #
+    # v1.1.0 起分成两种处置：
+    #   能配到擦写记录的（同一句里数值个数对不上）→ 记为 soft，
+    #   打回重译一次。这类以前是「只提示、永久放行」，实测原文两个尺寸、
+    #   译文给三个数还判「通过」，等于把真丢数的文件放过去。
+    #   配不到记录的（没有可写的位置）→ 仍然只当提示，改都改不了。
     for item in (metric_notes or []):
         text = str(item)
-        if text not in rep.notes:      # 同一句会被反复校验，提示别刷屏
+        if isinstance(item, dict):
+            page = item.get("page") or 0
+            src = str(item.get("src") or "")
+            detail = str(item.get("detail") or "同一句里数值个数与原文对不上，可能有数值被漏算或合并")
+            it = rep.add(page, "soft", src or text, detail, src=src)
+            if not it.refs:
+                # 没有可重写的位置：留在 issues 里只会让 summary 说「待核」，
+                # 却又没法处理。降级成普通提示。
+                rep.issues.remove(it)
+                if text not in rep.notes:
+                    rep.notes.append(text)
+        elif isinstance(item, str) and text not in rep.notes:
             rep.notes.append(text)
 
     # ---- 五、AI 抽查 ----

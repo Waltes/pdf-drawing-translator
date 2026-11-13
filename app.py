@@ -2358,6 +2358,15 @@ class App(GlassWindow):
                                  a=T("改成毫米") if mode == UNIT_METRIC else T("改成英寸"),
                                  a2=T("原图英寸已换算") if mode == UNIT_METRIC
                                  else T("原图毫米已换算")), "ok")))
+                    # 有的格子窄到只塞得下单位本身，注释放不进去。
+                    # 不说清楚的话，用户会以为每处都带了「原图是英寸」的注解，
+                    # 对着图纸找那行小字找不到
+                    nonote = stats.get("unit_decl_nonote") or 0
+                    if nonote:
+                        self.msg_q.put(("log", (
+                            i18n.fmt("   其中 {n} 处格子太窄，只写了单位、没放下"
+                                     "「原图已换算」那行小字。",
+                                     n=nonote), "dim")))
                 miss = stats.get("untranslated") or []
                 # 未译清单始终写一份：没有未译就写「全部译出」。
                 # 结构保持稳定，用户不用猜「这次是没漏，还是漏了没出清单」。
@@ -2878,7 +2887,9 @@ def _selftest():
             _d5.close()
             check(T("文字层折行"),
                   _plan5["fits"] and len(_lines5) == 2
-                  and _wide5 <= _g5.rect.width * 1.1 + 0.5,
+                  # 折出来的每一行都必须在框宽之内。v1.1.0 起不再给 1.1 倍余量：
+                  # 折行是「塞进框里」的动作，超出框的那一截擦不掉、也读不回
+                  and _wide5 <= _g5.rect.width + 0.5,
                   f"字号={_plan5['size']:.1f} · 行数={len(_lines5)} · "
                   f"最宽={_wide5:.1f}pt / 框宽={_g5.rect.width:.1f}pt")
         except Exception as exc:
@@ -2926,6 +2937,121 @@ def _selftest():
                   f"未译 {len(_st6.get('untranslated') or [])} 条")
         except Exception as exc:
             check(T("复核不过也出文件"), False, f"{type(exc).__name__}: {exc}")
+
+        # 复核的账不能串：一条译文第一次算错、重译算对之后，旧账要清掉。
+        # 不清的话第二轮复核照旧报同一处 —— 打回一次空转一次，
+        # 最后报告里还挂着一条早就修好的「数值可疑」，用户白核对一通。
+        try:
+            from core.translate import MetricReport as _MR
+            _mr = _MR()
+            _mr.add("warn", 3, "50 in. wide", "old", "算错")
+            _mr.add("fix", 3, "50 in. wide", "new", "已改")
+            _mr.drop(3, "50 in.  wide")     # 空白差异也要能配上同一处
+            check(T("复核账本不串旧账"),
+                  not [x for x in _mr.issues if x[0] == "warn"] and _mr.warned == 0,
+                  f"残留疑点 {len([x for x in _mr.issues if x[0] != 'fix'])} 条 · "
+                  f"计数 {_mr.warned}")
+        except Exception as exc:
+            check(T("复核账本不串旧账"), False, f"{type(exc).__name__}: {exc}")
+
+        # 未译清单只在「同一处全部写成」时才划掉。
+        # 一页上两处一样的英文、一处写成一处置空，以前会把整条划掉：
+        # 清单说「全部译出」，图上还留着一处原文，而目标中文时复核
+        # 不做文字层残留扫描，这一处就彻底没人发现了。
+        try:
+            _stA = {"untranslated": [(1, "DOOR PANEL")]}
+            pdf_engine._prune_untranslated(
+                _stA, [{"page": 1, "src": "DOOR PANEL", "out": "门板"},
+                       {"page": 1, "src": "DOOR PANEL", "out": None}])
+            _stB = {"untranslated": [(1, "DOOR PANEL")]}
+            pdf_engine._prune_untranslated(
+                _stB, [{"page": 1, "src": "DOOR PANEL", "out": "门板"}])
+            check(T("未译清单不误划"),
+                  bool(_stA["untranslated"]) and not _stB["untranslated"],
+                  f"只写成一处的{'保留' if _stA['untranslated'] else '被误划'} · "
+                  f"两处都写成的{'已划掉' if not _stB['untranslated'] else '没划掉'}")
+        except Exception as exc:
+            check(T("未译清单不误划"), False, f"{type(exc).__name__}: {exc}")
+
+        # 同一句里数值个数对不上（原文两个尺寸、译文三个数）以前只当提示、
+        # 永久放行，实测能被判成「复核通过」。现在要给一次重译机会，
+        # 但不能因此把整份文件判成未通过 —— 这类也可能是写法被数错。
+        try:
+            from core import review as _rv8
+            _d8 = pymupdf.open()
+            _p8 = _d8.new_page(width=320, height=200)
+            _p8.insert_font(fontname="cjk", fontfile=cjk_font)
+            _p8.insert_text((50, 55), "中文标注", fontname="cjk", fontsize=12)
+            # 页面上的中文要先擦掉：留着它会被文字层兜底扫描判成「原文未处理」，
+            # 那是硬错误（有框可改），会把这一项测成「误判为未通过」，
+            # 真正要验的「数值个数对不上只算存疑」反而看不出来
+            _g8 = pdf_engine.extract_groups(_p8)[0]
+            pdf_engine.erase_text(_p8, [_g8])
+            _fx8 = [{"page": 1, "kind": "single", "obj": _g8, "src": "中文标注",
+                     "rect": _g8.rect, "out": "中文标注", "lang": "zh",
+                     "mark": None}]
+            _rep8 = _rv8.review_document(
+                _d8, [], "en", untranslated=[],
+                metric_notes=[{"page": 1, "src": "中文标注", "text": "x",
+                               "detail": "同一句数值个数对不上"}],
+                fixmap={_rv8.fix_key(1, "中文标注"): _fx8})
+            _d8.close()
+            check(T("数值个数异常要重译"),
+                  (not _rep8.blocking) and len(_rep8.soft) == 1
+                  and bool(_rep8.retry_targets()),
+                  f"存疑 {len(_rep8.soft)} 处 · 可重译 {len(_rep8.retry_targets())} 处 · "
+                  f"{'不算未通过' if not _rep8.blocking else '误判为未通过'}")
+        except Exception as exc:
+            check(T("数值个数异常要重译"), False, f"{type(exc).__name__}: {exc}")
+
+        # 单位声明格写完之后要能被复核读回来。以前这一格完全不登记，
+        # 写空了、被后面的操作擦掉了都没人知道。
+        try:
+            from core import review as _rv9
+            _d9 = pymupdf.open()
+            _p9 = _d9.new_page(width=320, height=200)
+            _p9.insert_font(fontname="cjk", fontfile=cjk_font)
+            _p9.insert_text((50, 55), "英寸", fontname="cjk", fontsize=12)
+            _g9 = pdf_engine.extract_groups(_p9)[0]
+            _lay9 = {}
+            pdf_engine.erase_text(_p9, [_g9])
+            pdf_engine.write_unit_decl(_p9, _g9, "英寸", UNIT_METRIC, "en",
+                                       out_layout=_lay9)
+            _mk9 = [{"page": 1, "rect": _g9.rect,
+                     "ink": _lay9.get("rects"),
+                     "out": _lay9.get("main"), "src": "英寸"}]
+            _rep9 = _rv9.review_document(_d9, _mk9, "en", untranslated=[])
+            _d9.close()
+            check(T("声明格写入可回读"),
+                  bool(_lay9.get("rects")) and _rep9.checked_writes == 1
+                  and not _rep9.issues,
+                  f"写入框 {len(_lay9.get('rects') or [])} 个 · "
+                  f"回读{'正常' if not _rep9.issues else '判成空白'}")
+        except Exception as exc:
+            check(T("声明格写入可回读"), False, f"{type(exc).__name__}: {exc}")
+
+        # 英寸的裸写法（50 in wide / 1/2 in thick）要认，介词（1 in the box）不能认。
+        # 以前整类不认，后果是复算彻底空转、单位声明栏也不改 ——
+        # 模型一旦自己把数换成毫米，就成了「数值毫米 + 单位英寸」的矛盾文件。
+        try:
+            from core.translate import convert_units as _cu
+            _hit = _cu("50 in wide", UNIT_METRIC) == "1270.00mm wide"
+            _miss = _cu("1 in the box", UNIT_METRIC) == "1 in the box"
+            check(T("英寸的裸写法"), _hit and _miss,
+                  f"尺寸{'认得出' if _hit else '漏了'} · "
+                  f"介词{'没误伤' if _miss else '被误算'}")
+        except Exception as exc:
+            check(T("英寸的裸写法"), False, f"{type(exc).__name__}: {exc}")
+
+        # 标注版认不认中文单位：中文产出时译文写「100 毫米」很常见，
+        # 只认 mm/kg 的话这些数一个都标不上，标注版看着干净、实际漏标一半。
+        try:
+            _re = pdf_engine._num_unit_re(UNIT_METRIC)
+            check(T("标注版认中文单位"),
+                  bool(_re.search("100 毫米")) and bool(_re.search("100 mm")),
+                  "毫米/千克 可识别" if _re.search("100 毫米") else "只认 mm/kg")
+        except Exception as exc:
+            check(T("标注版认中文单位"), False, f"{type(exc).__name__}: {exc}")
 
         # 反方向：公制 → 英制。这是新增的输出单位，主链路里最容易接线漏掉的一环
         # （换算通了但单位声明没改、标注版标错单位，都属于这里能抓到的问题）

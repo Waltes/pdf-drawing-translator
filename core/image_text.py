@@ -438,13 +438,17 @@ def process_page_images(page, translate_fn, used_rects, report,
         p = by_id.get(id(c))
         mark = None
         if p is not None:
-            mark = {"page": None, "rect": c["rect"],
+            # ink 里两个框都要：原 OCR 框，和实际盖字用的外扩框。
+            # 折行时第一行会贴到框顶之外，只按原框回读会读不到、
+            # 被判成空白块（复核打回重译也修不好，纯空转）
+            mark = {"page": None, "rect": c["rect"], "ink": [c["rect"], p[2]],
                     "out": p[1], "src": c["text"]}
             if write_marks is not None:
                 write_marks.append(mark)
         if fixes is not None:
             fixes.append({"page": None, "kind": "image", "obj": c,
                           "src": c["text"], "rect": c["rect"],
+                          "ink": [c["rect"], p[2]] if p is not None else [c["rect"]],
                           "out": p[1] if p else None, "mark": mark})
 
     return paint_plans(page, plans, report)

@@ -343,6 +343,18 @@ EN = {
         "No file was produced. See the log above for the reason; if it says "
         "conversion failed, send that section to the developer.",
     "不可译内容放行": "Untranslatable content allowed",
+
+    # v1.1.0：复核记账、划账、软问题（数值个数对不上）与声明格回读
+    "复核账本不串旧账": "Metric ledger drops stale entries",
+    "未译清单不误划": "Untranslated list not over-pruned",
+    "数值个数异常要重译": "Number-count mismatch triggers retranslation",
+    "声明格写入可回读": "Unit-declaration cell can be read back",
+    "英寸的裸写法": "Bare inch abbreviation (50 in wide)",
+    "标注版认中文单位": "Annotated copy recognises Chinese units",
+    "   其中 {n} 处格子太窄，只写了单位、没放下"
+    "「原图已换算」那行小字。":
+        "   In {n} of them the cell was too narrow for the "
+        "\"converted from\" note; only the unit itself was written.",
     "英文词表已载入": "English dictionary loaded",
     "读取 PDF": "Read PDF",
     "换算": "convert",

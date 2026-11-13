@@ -182,13 +182,22 @@ FT_IN_RE = re.compile(
 FT_RE = re.compile(_LEAD + r"(?P<num>\d+(?:\.\d+)?)\s*"
                    + _FT_MARK + r"(?![A-Za-z0-9])")
 
-# 英寸的另一种缩写：4in、4 in.、4 IN。
-# 为什么不直接认 in：英文句子 "1 in the box"、"2 in total" 里的 in 是介词，
-# 一旦忽略大小写去匹配，就会把 1 换成 25.40mm，把整句改烂。
-# 所以只认三种低风险写法：紧贴数字的 in、带句点的 in.、全大写的 IN。
+# 英寸的另一种缩写：4in、4 in.、4 IN、50 in wide。
+# 为什么不直接认所有 in：英文句子 "1 in the box"、"2 in total" 里的 in 是介词，
+# 一旦无条件匹配，就会把 1 换成 25.40mm，把整句改烂。
+# 所以分两类：
+#   低风险的三种写法（紧贴数字的 in、带句点的 in.、全大写的 IN）无条件认；
+#   空格分开的小写 in 只有**后面不跟介词/冠词**时才认 —— 图纸上的尺寸标注
+#   最常见就是「50 in wide」「12 in long」「1/2 in thick」这种，
+#   以前整类都不认，后果是复算完全空转（原文抽不出目标单位值，校验直接跳过），
+#   单位声明栏也不改 —— 一旦模型自己把数换成毫米，就成了
+#   「数值是毫米、单位栏还写着英寸」的自相矛盾文件。
+_IN_PREP = (r"(?!\s*(?:the|a|an|this|that|these|those|its|their|our|your|his|her"
+            r"|order|total|place|position|line|row|front|back|both|each|all"
+            r"|accordance|addition|general|detail|details|case|fact|turn|size)\b)")
 IN_ABBR_RE = re.compile(
     _LEAD + r"(?P<num>" + _IMP_NUM + r")"
-    r"(?P<unit>in(?![A-Za-z])|\s*in\.|\s*IN\b\.?)")
+    r"(?P<unit>in(?![A-Za-z\s])|\s*in\.|\s*IN\b\.?|\s*in(?![A-Za-z])" + _IN_PREP + r")")
 
 # 中文写法的英制单位：9英尺、12英寸、25磅、8盎司。
 # 为什么必须认：英文图纸里的 9 ft 交给 AI 翻译时，模型有时会「贴心地」
@@ -820,6 +829,38 @@ class MetricReport:
             self.warned += 1
         if len(self.issues) < self.LIMIT:
             self.issues.append((level, page, src, out, detail))
+
+    def drop(self, page, src):
+        """
+        清掉某一处的记账。
+
+        场景：一条译文第一次算错（记了 warn）、复核打回、重译后算对了。
+        不清旧账的话，下一轮复核仍然按第一次的结果报同一处 —— 反复打回、
+        反复重译，最后报告里还挂着一条早就修好的「数值可疑」。
+        实测就是这样空转的：页面已经是正确的 1270.00 mm，报告仍说数值不符。
+
+        "fix" 那类（自动纠正）不清：它不是问题，是「改了多少处」的计数。
+        """
+        try:
+            key = (int(page or 0), re.sub(r"\s+", "", src or ""))
+        except (TypeError, ValueError):
+            return
+        keep = []
+        for it in self.issues:
+            try:
+                level, pno, s_txt = it[0], it[1], it[2]
+            except (TypeError, IndexError):
+                keep.append(it)
+                continue
+            if level != "fix" and \
+                    (int(pno or 0), re.sub(r"\s+", "", s_txt or "")) == key:
+                if level == "notice":
+                    self.noticed = max(0, self.noticed - 1)
+                elif level == "warn":
+                    self.warned = max(0, self.warned - 1)
+                continue
+            keep.append(it)
+        self.issues = keep
 
     def summary(self):
         """给状态条用的一行字"""
@@ -2307,6 +2348,11 @@ class Translator:
                 out[i] = val
                 self.stats["llm"] += 1
                 self.retranslated = getattr(self, "retranslated", 0) + 1
+                # 重译出来的这一版也要进语义抽查队列。
+                # 不登记的话，打回重译等于绕过了唯一那道「意思有没有走样」的检查：
+                # 新的译文只过规则校验和换算复算，两样都查不出「通顺但意思错了」。
+                if self._review_worthy(src_text, val):
+                    self._review_list.append((self.page_no, src_text, val))
                 # 用新的覆盖缓存里的旧译文：否则下一份文件还会拿到
                 # 那条被判不合格的结果，等于每次都要重走一遍重译。
                 src_lang, _d = self._resolve(hint)
