@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.1
+Version 1.1.2
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.1.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.2.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -440,24 +440,41 @@ Text coverage: 150 to translate, 114 translated (5 from bitmaps), 36 untranslate
 Some drawings are exported with "convert text to outlines". Part of the lettering is drawn
 as vector outlines — zoom in and the characters are hollow, stroked but not filled. They are
 plainly visible on the page, yet absent from the text layer, so the normal pipeline cannot
-reach them and they stay in the original language.
+reach them.
 
-The program checks each page and writes what it finds into the untranslated list, in a
-section of its own:
+The program reads them, matches them against the glossary, and rewrites the ones it can:
+
+- A match (`Front view`, `Top view`, `Side view`, and section headings such as
+  `Cut B - B`) is **replaced with Chinese in place**. The type size follows the measured
+  height of the original lettering and the colour is carried over. The log and the closing
+  summary both state how many were replaced.
+- No match stays as it is and is listed in the untranslated list, with the reason.
+
+Two cases are deliberately left untouched:
+
+- The recognised wording is not in the glossary — the program will not write a word it is
+  not sure about.
+- A dimension line runs through the box — covering it would break the line.
+
+Matching against the glossary is what makes this safe. Hollow outlines OCR unreliably:
+`Top view` comes back as `Top vlew`, `Side view` as `Sldo vow`. Handing that straight to a
+translation model produces a different word on the drawing, and a wrong word is far harder
+to notice than leftover English. Glossary matching with a small tolerance for misread
+letters fixes the misreads without inventing anything.
+
+Whatever could not be changed is still listed in its own section of the untranslated list:
 
 ```
 Outlined text: these characters were converted to vector outlines on export.
-They are visible on the drawing but absent from the text layer, so the program
-cannot reach them and they remain in the original language.
+They are visible on the drawing but absent from the text layer.
+Where the wording matched the glossary, the program replaced it with Chinese in place;
+the items below could not be changed and remain in the original language.
 
-page 1  Cut A - A
-page 1  Top view
+page 1  some part label
 ```
 
-The wording in that section was read back by OCR and may contain the odd misrecognised
-letter; check it against the drawing. To actually change those spots there are only two
-options: have the drafter re-export a PDF with live text, or run the file through the
-program's image mode, which redoes the whole page (limited: type gets compressed).
+For a complete fix, have the drafter re-export a PDF with live text, or run the file through
+image mode, which redoes the whole page (limited: type gets compressed).
 
 #### When the box is too narrow: wrap first, keep the source as a last resort
 
@@ -912,7 +929,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.1.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.2.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 
