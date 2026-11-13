@@ -28,6 +28,9 @@ from .paths import DATA_DIR
 # 折行规则与文字层共用一套（core/textfit.py）。两边各写一份的话，
 # 同一张图上一样宽的框会出现「一处折行、一处留白」的不一致。
 from . import textfit
+# 字号反算与标点规范也共用一套（core/typography.py）：
+# 文字层和位图层写字的方式不同，但「写出来该多大、该有哪些空格」是同一件事。
+from . import typography
 
 # OCR 组件与 numpy 都改成惰性加载（首次真正要用图像模式时才导入）。
 #
@@ -260,29 +263,19 @@ def fix_ocr_spacing(text):
     OCR 经常把英文单词之间的空格吃掉（Brace tube → Bracetube、Fence foot → Fencefoot），
     导致词典查不到、整条被当成"没变化"跳过。
     这里用术语库词表做最长匹配，把连写串切回正常的词。切不出来就原样返回，不乱动。
+
+    v1.1.3 起把「字母+数字」的混合串也纳入（QTY750panels、M8x40BOLT）：
+    原先只认纯字母，客户图上的数量行就是这么粘着写出去的。
+    切分规则统一放在 core/typography.split_glued，切不全就不动。
     """
     t = (text or "").strip()
-    if " " in t or len(t) < 5 or not re.fullmatch(r"[A-Za-z]+", t):
+    if " " in t or len(t) < 5:
         return text
     vocab = _get_vocab()
     if not vocab or t.upper() in vocab:
         return text
-
-    pieces, i = [], 0
-    while i < len(t):
-        for size in range(min(24, len(t) - i), 2, -1):
-            if t[i:i + size].upper() in vocab:
-                pieces.append(t[i:i + size])
-                i += size
-                break
-        else:
-            pieces.append(t[i])
-            i += 1
-
-    joined = " ".join(pieces)
-    if " " not in joined or any(len(p) == 1 for p in pieces):
-        return text
-    return joined
+    fixed = typography.split_glued(t, vocab)
+    return fixed or text
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +494,92 @@ def lookup_outline_term(text):
     for en, zh in en2zh.items():
         if _term_close(norm, en):
             return zh
-    return None
+
+    # 整串都对不上时，退一步按词拆开译。
+    #
+    # 为什么需要这层：客户图上的 SURFACE TREATMENT:Hot-dip galvanized 是一条
+    # 完整的标注，整串在术语表里当然没有这一条，于是一直保留英文。
+    # 按词拆开之后，「表面处理」「热浸锌」都在表里，整条就能译出来。
+    # 代价是词序可能不地道 —— 但图纸标注本来就是短语堆叠，比留着英文强。
+    return _translate_by_parts(text)
+
+
+# 分段兜底的最低命中率。低于这个比例说明 OCR 认错了字或者表里确实没有，
+# 硬拼出来的中英混杂比原文更难读，不如保持英文并在清单里报出来。
+_PART_HIT_RATIO = 0.6
+
+_GLOSSARY_CACHE = None
+
+
+def _get_glossary():
+    """术语表只加载一次（669 条 CSV，每个词都重读会把整页 OCR 拖慢几倍）"""
+    global _GLOSSARY_CACHE
+    if _GLOSSARY_CACHE is None:
+        try:
+            from . import dict_engine
+            _GLOSSARY_CACHE = dict_engine.Glossary()
+        except Exception:
+            _GLOSSARY_CACHE = False
+    return _GLOSSARY_CACHE or None
+
+
+def _get_word_vocab():
+    """
+    术语库里出现过的**单个英文词**（大写）。
+
+    和 _get_vocab 的区别：那个是整条词条（"DRAWING NO."，带点带空格），
+    只能判断「这一整串认不认识」；拆分粘连串需要的是单词表，
+    否则 QTY750panels 永远拆不动。
+    """
+    global _WORD_VOCAB
+    if _WORD_VOCAB is None:
+        words = set()
+        try:
+            from .dict_engine import Glossary
+            for en in Glossary().en2zh:
+                for w in en.split():
+                    w = w.strip(".,;:()[]{}/\\-\"'")
+                    if len(w) >= 2 and w.isalpha():
+                        words.add(w.upper())
+        except Exception:
+            pass
+        _WORD_VOCAB = words
+    return _WORD_VOCAB
+
+
+_WORD_VOCAB = None
+
+
+def _translate_by_parts(text):
+    """
+    把一整条拆成词逐段译，命中率够高才采用。
+
+    返回 None 表示「译不动」—— 调用方会保持原文并计入未译清单。
+    """
+    gl = _get_glossary()
+    if gl is None:
+        return None
+    t = (text or "").strip()
+    if not t:
+        return None
+    # 先把粘在一起的词拆开再逐段译：QTY750panels 这种串不拆开，
+    # 每个词都查不到，整条只能原样保留。
+    t = typography.split_glued_text(t, _get_word_vocab())
+    words = re.findall(r"[A-Za-z][A-Za-z']*", t)
+    if not words:
+        return None
+    try:
+        from . import dict_engine
+        out, miss = dict_engine.en_to_zh(t, gl)
+    except Exception:
+        return None
+    if not out or out == t:
+        return None
+    miss_words = [m for m in miss if re.search(r"[A-Za-z]", m)]
+    ratio = 1.0 - len(miss_words) / float(len(words))
+    if ratio < _PART_HIT_RATIO:
+        return None
+    return out
 
 
 def _seg_hits_rect(p1, p2, r):
@@ -643,8 +721,13 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
                     ink_h = (rows[-1] - rows[0] + 1) / z
         except Exception:
             pass
-        # 汉字实际字面约占字号 0.86，反推回去才对得上原来的大小
-        hint = min(max(ink_h / 0.86, 3.5), box.height * 1.2)
+        # hint 的语义是「原件这一行的墨迹高度」，不是字号。
+        # 字号由排版模块按目标文字自己的字面比例反算（typography.size_for_ink）：
+        # 同样一个字号，全大写的行（SURFACE TREATMENT）和带下伸部的行
+        # （Hot-dip galvanized）写出来差三成高。原来统一除以 0.86 再乘一个
+        # 固定系数，结果带 g/y/p 的句子被写成比原件高一到两成 ——
+        # 客户看到的就是「字变形了、跟旁边不一样大」。
+        hint = ink_h
 
         cand = {"text": text, "rect": box, "bg": bg, "fg": fg,
                 "hint": "en", "vertical": False}
@@ -870,7 +953,9 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
         if untranslated is not None:
             untranslated.append(("图片内文字", c["text"]))
         return None
-    out = out.strip()
+    # 规范化标点与空格：中文全角、英文冒号后带空格、多余空格压掉。
+    # 位图层和文字层走同一套规则，一张图上不会出现两种逗号。
+    out = typography.normalize(out.strip())
     if font_cjk is None:
         font_cjk = _get_cjk_font()
     if font_latin is None:
@@ -914,10 +999,17 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
             untranslated.append(("图片内文字", c["text"]))
         return None
 
-    # 字号对齐原文字高，放不下再缩；颜色沿用原文字色。
-    # 英文标注普遍比中文窄也比中文矮，用同一个字号会显得偏小，
-    # 乘 1.08 补一点观感；上限仍受排版长度约束
-    size = glyph_h * (1.0 if _CJK_RE.search(out) else 1.08)
+    # 字号对齐原文字的**墨迹高度**，不是对齐「字号数字」，也不是对齐框高。
+    # 三种来源要先统一成同一种东西：
+    #   glyph_h_hint —— 调用方渲染后数暗像素量出来的真实墨迹高度，直接可用；
+    #   OCR 框高/框宽 —— 框比笔画本身高约两成（含留白），按 0.85 折回墨迹高度；
+    #   英文标注普遍比中文窄也比中文矮，不再乘 1.08 补观感 —— 那一条是
+    #   在没有墨迹高度时的权宜之计，现在有了真实高度，补就成了放大。
+    if vertical:
+        want_ink = glyph_h_hint or (r.width * 0.85)
+    else:
+        want_ink = glyph_h_hint or (r.height * 0.85)
+    size = typography.size_for_ink(font, out, want_ink)
     width = font.text_length(out, fontsize=size)
     if width > maxw > 0:
         size = size * maxw / width

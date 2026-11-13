@@ -62,6 +62,12 @@ EN = {
     "转曲文字不误报文字层": "outlined-text scan ignores live text",
     "曲线文字认词不出错": "outlined-text terms survive OCR misreads",
     "曲线文字不碰文字层": "outlined rewrite leaves live text alone",
+    "词距按坐标补空格": "word gaps restored from span coordinates",
+    "字号按字面高度反算": "font size derived from ink height",
+    "标点与空格规范": "punctuation and spacing normalised",
+    "粘连的词拆得开": "glued words split back apart",
+    "标题栏编号不被译错": "title-block numbers translated correctly",
+    "冒号粘连的整条能译": "whole line translated when a colon is glued",
     "OCR 组件不可用，跳过": "OCR unavailable, skipped",
     "{name} 计量数据校验清单": "{name} — measurement check report",
     "怎么读这份清单：\n  已纠正 —— 程序按原文重新算过并改正的，不用处理，核对一眼即可；\n  待确认 —— 程序判不准（多半是同句里数量对不上），请对照原图核实。\n\n":

@@ -20,6 +20,7 @@ from . import image_text
 from . import i18n
 from . import paragraph as paragraph_mod
 from . import textfit
+from . import typography
 from . import review as review_mod
 # 单位换算的判定要和翻译层用同一套规则，不能各写一份：
 # 「这条原文里有没有会被换算的量」直接问翻译层要答案，
@@ -284,12 +285,51 @@ def extract_groups(page, page_no: int = 0):
     return groups
 
 
+def _en_vocab():
+    """
+    术语表里的英文词表，用来把粘连串拆回词。
+
+    只在第一次调用时读一遍 CSV（669 条），之后复用。
+    读不到就返回空集 —— 拆不动时保持原样，绝不让提取环节抛异常。
+    """
+    global _EN_VOCAB
+    if _EN_VOCAB is not None:
+        return _EN_VOCAB
+    words = set()
+    try:
+        from . import dict_engine
+        for en in dict_engine.Glossary().en2zh:
+            for w in en.split():
+                w = w.strip(".,;:()[]{}/\\-\"'")
+                # 只收纯字母，且长度 >=2：单词表里混进 1 个字母的缩写
+                # 会把任何串都拆开，反而制造新的粘连
+                if len(w) >= 2 and w.isalpha():
+                    words.add(w.upper())
+    except Exception:
+        pass
+    _EN_VOCAB = words
+    return _EN_VOCAB
+
+
+_EN_VOCAB = None
+
+
 def _make_group(spans, line_dir, page_no, block_no=-1):
     """把若干个相邻 span 合成一个文字块"""
     g = TextGroup()
     g.spans = list(spans)
     g.block = block_no
-    g.text = "".join(s.get("text", "") for s in spans)
+    # 用排版模块拼接，不用 "".join：CAD 导出常把一句话切成多个 span，
+    # 词与词之间没有空格字符、只有坐标上的空隙。直接拼接会拼出
+    # QTY750panels 这种串，翻译器会当成型号原样返回，图上就留下一串粘字。
+    g.text = typography.join_spans(spans)
+    # 拼接之后仍然可能粘着：QTY750panels 这种串本身就是由一个 span 送出来的
+    # （CAD 导出、或者上游 OCR 已经吃掉了空格），join_spans 没有边界可依据。
+    # 按术语表把它拆回 QTY 750 panels，翻译器才认得这是「数量 + 数字 + 单位」。
+    g.text = typography.split_glued_text(g.text, _en_vocab())
+    # 冒号后面补空格：SURFACE TREATMENT:Hot-dip 粘成一条时，
+    # 翻译器会当成一段完整规格原样返回，图上就留着英文。
+    g.text = typography.fix_word_gaps(g.text)
     g.dir = line_dir
 
     # 位置取并集，保证擦除时覆盖所有字符
@@ -546,6 +586,22 @@ def plan_group(g, text, obstacles=()):
     ang = abs(g.angle) % 180
     quarter = 45 <= ang <= 135
     box = g.rect.height if quarter else g.rect.width
+
+    # 写入前的排版规范化：压掉多余空格、补上标点后的空格、
+    # 中文换全角标点。这一步只改写法不改字义。
+    text = typography.normalize(text)
+    # 中英之间留半个字的空隙是中文排版的通行做法，但它会占宽。
+    # 所以只在「加了还放得下」时才加 —— 窄框里先保证塞得进去，
+    # 空隙是锦上添花，不能为了好看把一整条挤成写不下。
+    spaced = typography.space_cjk_latin(text)
+    if spaced != text and box > 0:
+        try:
+            if (font.text_length(spaced, fontsize=g.size)
+                    <= box * FIT_MAX_RATIO):
+                text = spaced
+        except Exception:
+            pass
+
     out = {"g": g, "text": text, "font": font, "size": g.size,
            "lines": None, "fits": True, "why": ""}
     if box <= 0:
@@ -599,6 +655,9 @@ def write_paragraph(page, lines, new_text, out_layout=None):
     段落最后一行会吃下全部剩余文字，可能比原行宽出一截，
     只擦原框就会留下半截旧词。
     """
+    # 段落回填也走同一套标点/空格规范。两处各写一份的话，
+    # 同一张图上段落和单行标注会出现两种逗号，看着像是两个人做的。
+    new_text = typography.normalize(new_text)
     font = font_for(new_text)
 
     if len(new_text) <= 26 and len(lines) <= 2:

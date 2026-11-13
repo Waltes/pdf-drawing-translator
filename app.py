@@ -268,6 +268,7 @@ try:
     from core import pdf_engine
     from core import i18n
     from core import image_text
+    from core import typography
     from core.i18n import T
     from core.llm_client import (PRESETS, generic_hint, is_local_url, key_guide,
                                  preset_for, preset_label)
@@ -3363,6 +3364,97 @@ def _selftest():
               f"available={c.available()} price={price}")
     except Exception as exc:
         check(T("本机部署免密钥"), False, f"{type(exc).__name__}: {exc}")
+
+    # 排版规则：这一版新加的三条，全部是客户看图看出来的问题。
+    #
+    # 1) 词距。CAD 导出把一句话切成多个 span、中间没有空格字符时，
+    #    按坐标补空格，不能拼成 QTY750panels；
+    #    但同一个数字被切开的（10|20）不能补成 10 20。
+    try:
+        spans = [{"text": "QTY", "bbox": (100, 100, 120, 110), "size": 10},
+                 {"text": "750", "bbox": (123, 100, 140, 110), "size": 10},
+                 {"text": "panels", "bbox": (143, 100, 175, 110), "size": 10}]
+        glued = typography.join_spans(spans)
+        kept = typography.join_spans(
+            [{"text": "10", "bbox": (0, 0, 10, 10), "size": 10},
+             {"text": "20", "bbox": (10, 0, 20, 10), "size": 10}])
+        check(T("词距按坐标补空格"),
+              glued == "QTY 750 panels" and kept == "1020",
+              f"{glued!r} / {kept!r}")
+    except Exception as exc:
+        check(T("词距按坐标补空格"), False, f"{type(exc).__name__}: {exc}")
+
+    # 2) 字号按字面高度反算。同一段墨迹高度，全大写的行要写更大的字号、
+    #    带下伸部的行要写更小的字号，写出来的高度才一样 ——
+    #    这是「看着不像后贴的」的关键。
+    try:
+        f = pymupdf.Font("helv")
+        caps = typography.size_for_ink(f, "SURFACE TREATMENT", 6.0)
+        desc = typography.size_for_ink(f, "Hot-dip galvanized", 6.0)
+        cjk = typography.size_for_ink(image_text._get_cjk_font(), "门板", 6.0)
+        ok_size = (caps > desc + 0.5 and 5.5 < cjk < 7.0
+                   and abs(caps * typography.ink_ratio(f, "SURFACE TREATMENT")
+                           - 6.0) < 0.05)
+        check(T("字号按字面高度反算"), ok_size,
+              f"全大写 {caps:.2f} / 带下伸部 {desc:.2f} / 汉字 {cjk:.2f}")
+    except Exception as exc:
+        check(T("字号按字面高度反算"), False, f"{type(exc).__name__}: {exc}")
+
+    # 3) 标点与空格。中文用全角、英文冒号后补空格、数字里的点和逗号不许动。
+    try:
+        a = typography.normalize("SURFACE TREATMENT:Hot-dip  galvanized")
+        b = typography.normalize("表面处理:热镀锌,厚度5.00mm(参考)")
+        c2 = typography.normalize("5.00mm , 1,000 pcs")
+        ok_punct = (a == "SURFACE TREATMENT: Hot-dip galvanized"
+                    and b == "表面处理：热镀锌，厚度5.00mm（参考）"
+                    and c2 == "5.00mm, 1,000 pcs")
+        check(T("标点与空格规范"), ok_punct, f"{a} | {b} | {c2}")
+    except Exception as exc:
+        check(T("标点与空格规范"), False, f"{type(exc).__name__}: {exc}")
+
+    # 4) 粘在一起的词要拆得开。客户图上的 QTY750 panels 和
+    #    QTY750panels 两串都原样留着英文，就是因为没拆开、翻译器当成型号。
+    #    同时要保证型号不被拆坏（M8X30、DN50 拆开就是另一个零件）。
+    try:
+        vocab = image_text._get_word_vocab()
+        cut1 = typography.split_glued_text("QTY750panels", vocab)
+        cut2 = typography.split_glued_text("QTY750 panels", vocab)
+        keep1 = typography.split_glued_text("M8X30 BOLTS", vocab)
+        keep2 = typography.split_glued_text("DN50", vocab)
+        ok_glue = (cut1 == "QTY 750 panels" and cut2 == "QTY 750 panels"
+                   and keep1 == "M8X30 BOLTS" and keep2 == "DN50")
+        check(T("粘连的词拆得开"), ok_glue,
+              f"{cut1!r} / {cut2!r} / {keep1!r} / {keep2!r}")
+    except Exception as exc:
+        check(T("粘连的词拆得开"), False, f"{type(exc).__name__}: {exc}")
+
+    # 5) 标题栏的 DRAWING NO. 不能被译成「图纸不允许有.」。
+    #    术语表里 NO 单独对应「不允许有」，只该在 NO SCRATCH 这类整句里用。
+    try:
+        from core import dict_engine as _de
+        _gl = _de.Glossary()
+        t1 = _de.en_to_zh("DRAWING NO.:SB-2024-001-REV", _gl)[0]
+        t2 = _de.en_to_zh("DRAWING NO.: SB-2024-001-REV", _gl)[0]
+        t3 = _de.en_to_zh("NO SCRATCH ON SURFACE", _gl)[0]
+        ok_title = ("图纸编号" in t1 and "图纸编号" in t2
+                    and "不允许有" not in t1 and "不允许有" not in t2
+                    and "不允许有" in t3)
+        check(T("标题栏编号不被译错"), ok_title, f"{t1} | {t2} | {t3}")
+    except Exception as exc:
+        check(T("标题栏编号不被译错"), False, f"{type(exc).__name__}: {exc}")
+
+    # 6) 冒号粘着字母时整条也要能译。客户图上
+    #    SURFACE TREATMENT:Hot-dip galvanized 整条留英文，就是卡在这里。
+    try:
+        s = "SURFACE TREATMENT:Hot-dip galvanized"
+        one = _de.en_to_zh(s, _gl)[0]
+        two = image_text.lookup_outline_term(s)
+        junk = image_text.lookup_outline_term("XYZQW VLEW")
+        ok_gap = ("表面处理" in one and "热浸锌" in one
+                  and two and "表面处理" in two and junk is None)
+        check(T("冒号粘连的整条能译"), ok_gap, f"{one} | {two} | {junk}")
+    except Exception as exc:
+        check(T("冒号粘连的整条能译"), False, f"{type(exc).__name__}: {exc}")
 
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")

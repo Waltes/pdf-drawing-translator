@@ -81,12 +81,106 @@ def normalize(text: str) -> str:
     return text
 
 
+# 只在短语里有意义、单独出现时不能替换的词。
+#
+# 来源：术语表里收了一条 NO → 不允许有（配合 NO SCRATCH ON SURFACE 这类整句）。
+# 于是标题栏的 DRAWING NO. 被拆成 DRAWING + NO.，NO 单独命中「不允许有」，
+# 整行变成「图纸不允许有.」—— 标题栏最高频的字段之一被译成了错话。
+# 这些词在图纸上是语法成分（否定词、冠词、介词），不是术语，
+# 单独出现时保留原文，比猜一个意思安全。
+_NOT_STANDALONE = {
+    "NO", "NOT", "AND", "OR", "OF", "FOR", "WITH", "WITHOUT", "THE",
+    "TO", "IN", "ON", "AT", "BY", "AS", "PER", "BE", "IS", "ARE",
+}
+
+
+def _key_norm(s: str) -> str:
+    """
+    查表用的归一形式：去掉词尾标点，并把「句点 + 空格」当成词分隔。
+
+    为什么需要：术语表收的是 "DRAWING NO."（带点），而图纸上同一格
+    可能写成 "DRAWING NO.: SB-001"（后面直接跟冒号）。不说这个点，
+    整条就查不到，退化成逐词翻译，标题栏就出现「图纸 NO.:」这种半截译文。
+
+    句点后跟空格的规则来自 "REV. NO."（版本号）这类写法：
+    点在这里只是缩写的结尾，不是数字的小数点，去掉才能对上 "REV NO"。
+    小数点后面不跟空格，所以 "5.00MM" 不会被拆坏。
+    """
+    s = (s or "").strip()
+    s = re.sub(r"\.\s+", " ", s)
+    return re.sub(r"[.:;,]+$", "", s)
+
+
+def _key_loose(s: str) -> str:
+    """
+    更宽松的归一形式：在 _key_norm 的基础上把连字符当成空格。
+
+    为什么需要：同一件东西，术语表收的是 HOT DIP GALVANIZED，
+    图纸上却常写成 Hot-dip galvanized。连字符只影响书写习惯，
+    不改变它指的东西，所以查表时两种写法应当等价。
+    这条只在精确匹配都失败后才用，避免把 X-RAY 这种真复合词拆坏。
+    """
+    return re.sub(r"\s+", " ", _key_norm((s or "").replace("-", " ")).strip())
+
+
+def _singular_variants(word: str):
+    """一个词的复数还原候选：GALVANIZED → GALVANIZE / GALVANIZED → GALVANIZ"""
+    w = (word or "").upper()
+    out = []
+    if w.endswith("IES") and len(w) > 4:
+        out.append(w[:-3] + "Y")
+    if w.endswith("ES") and len(w) > 3:
+        out.append(w[:-2])
+    if w.endswith("S") and len(w) > 2:
+        out.append(w[:-1])
+    return out
+
+
+def _lookup_phrase(seg, gl):
+    """
+    查一个词组（1 个或多个词），失败返回 None。
+
+    四级回退，顺序有讲究：
+      1. 原样 —— 作者写什么就是什么，最可信
+      2. 去尾标点 —— DRAWING NO. 与 DRAWING NO 是同一条
+      3. 连字符当空格 —— Hot-dip 与 HOT DIP 是同一条
+      4. 末词复数还原 —— GALVANIZED 在表里收作 GALVANIZE
+    每一级都命中就停，不回退到更松的那级去「找点东西出来」。
+    """
+    key = " ".join(p[1] for p in seg).upper()
+    hit = gl.en2zh.get(key)
+    if hit:
+        return hit, False
+
+    hit = gl.en2zh_norm.get(_key_norm(key))
+    if hit:
+        return hit, True
+
+    hit = gl.en2zh_loose.get(_key_loose(key))
+    if hit:
+        return hit, True
+
+    # 末词复数还原：只动最后一个词，其余保持
+    if len(seg) >= 1:
+        cores = [p[1] for p in seg]
+        for cand in _singular_variants(cores[-1]):
+            trial = " ".join(cores[:-1] + [cand]).upper()
+            hit = (gl.en2zh.get(trial)
+                   or gl.en2zh_norm.get(_key_norm(trial))
+                   or gl.en2zh_loose.get(_key_loose(trial)))
+            if hit:
+                return hit, True
+    return None, False
+
+
 class Glossary:
     """术语库：同时持有 中→英 与 英→中 两张表"""
 
     def __init__(self, path: str = GLOSSARY_PATH):
         self.zh2en = {}
         self.en2zh = {}
+        self.en2zh_norm = {}        # 去尾标点的查表副本，见 _key_norm
+        self.en2zh_loose = {}       # 连字符当空格的副本，见 _key_loose
         self.zh_maxlen = 1          # 中文词条最大字数，用于最长匹配扫描
         self.en_maxwords = 1        # 英文词条最大词数，用于 n-gram 匹配
         self._load(path)
@@ -108,6 +202,18 @@ class Glossary:
                 self.zh2en.setdefault(zh, en)
                 # 英→中：英文统一大写入表，匹配时也大写化
                 self.en2zh.setdefault(en.upper(), zh)
+                # 同一个词条的「去尾标点」形式另存一份，供带冒号/句点的写法命中。
+                # 两张副本都**无条件**存：只存「与原写法不同」的条目，
+                # 会让没有连字符的词条反倒在宽松表里缺失 ——
+                # 图纸写成 HOT-DIP、表里收 HOL DIP 时，宽松表就查不到。
+                # 669 条撑到两倍也就千余条，这点内存不值得拿正确性换。
+                nk = _key_norm(en.upper())
+                if nk:
+                    self.en2zh_norm.setdefault(nk, zh)
+                # 连字符形式的副本：HOT-DIP GALVANIZE 与 HOT DIP GALVANIZED 互通
+                lk = _key_loose(en.upper())
+                if lk:
+                    self.en2zh_loose.setdefault(lk, zh)
                 if CJK_RE.search(zh):
                     self.zh_maxlen = max(self.zh_maxlen, len(zh))
                 self.en_maxwords = max(self.en_maxwords, len(en.split()))
@@ -154,12 +260,15 @@ EN_RULES = [
     (r"^approved\s+by\s+(.+)$", r"批准：\1"),
     (r"^rev\.?\s*([A-Za-z0-9]+)$", r"版本 \1"),
     (r"^revision\s*[:：]?\s*([A-Za-z0-9]+)$", r"版本 \1"),
-    (r"^scale\s*[:：]?\s*(.+)$", r"比例 \1"),
-    (r"^date\s*[:：]?\s*(.+)$", r"日期 \1"),
+    # 下面几条是「标签: 值」句式。值不能以冒号开头 ——
+    # 原来的 (.+) 是贪婪的，[:：]? 可以不吃那个冒号，让 (.+) 把它吃进去，
+    # 于是单独一个 "MATERIAL:" 被展开成 "材质：:"（两个冒号）。
+    (r"^scale\s*[:：]?\s*([^:：\s].*)$", r"比例 \1"),
+    (r"^date\s*[:：]?\s*([^:：\s].*)$", r"日期 \1"),
     (r"^qty\.?\s*[:：]?\s*(\d+)$", r"数量 \1"),
-    (r"^material\s*[:：]?\s*(.+)$", r"材质：\1"),
-    (r"^finish\s*[:：]?\s*(.+)$", r"表面处理：\1"),
-    (r"^tolerance\s*[:：]?\s*(.+)$", r"公差：\1"),
+    (r"^material\s*[:：]?\s*([^:：\s].*)$", r"材质：\1"),
+    (r"^finish\s*[:：]?\s*([^:：\s].*)$", r"表面处理：\1"),
+    (r"^tolerance\s*[:：]?\s*([^:：\s].*)$", r"公差：\1"),
 ]
 
 ZH_RULES = [
@@ -299,6 +408,10 @@ def en_to_zh(text: str, gl: Glossary):
     text = normalize(text)
     if not text:
         return "", []
+    # 标点后面粘着字母时补一个空格：SURFACE TREATMENT:Hot-dip 这种写法，
+    # 不补空格会被当成一整串规格，匹配不到任何词条，整条原样留在图上。
+    # 只在后面跟字母时补 —— 尺寸 1:2、5.00mm 里的标点不能动。
+    text = re.sub(r"([,;:])(?=[A-Za-z])", r"\1 ", text)
 
     if text.upper() in gl.en2zh:
         return gl.en2zh[text.upper()], []
@@ -331,13 +444,23 @@ def en_to_zh(text: str, gl: Glossary):
             # 词组里混入占位符则不能整体匹配（否则会把数字吃掉）
             if any(not p[1] for p in seg):
                 continue
+            hit, from_loose = _lookup_phrase(seg, gl)
             key = " ".join(p[1] for p in seg).upper()
-            hit = gl.en2zh.get(key)
             # 单词查不到时，再试一次复数回退（POSTS → POST）
             if hit is None and size == 1:
                 hit = _lookup_word(seg[0][1], gl)
+                from_loose = hit is not None
+            # 语法成分单独出现时不替换：NO 单独译成「不允许有」会把
+            # DRAWING NO. 变成「图纸不允许有.」，而它在这条里只是「编号」
+            if hit and size == 1 and _key_norm(key) in _NOT_STANDALONE:
+                hit = None
             if hit:
                 head, tail = seg[0][0], seg[-1][2]
+                # 命中的是「带句点的词条」（DRAWING NO. → 图纸编号）时，
+                # 那个句点是词条的组成部分，不该跟着译文后面再出现一次，
+                # 否则图上会写成「图纸编号.: SB-001」。
+                if from_loose and tail.startswith("."):
+                    tail = tail[1:]
                 out.append(head + hit + tail)
                 i += size
                 matched = True
