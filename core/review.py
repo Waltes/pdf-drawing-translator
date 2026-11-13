@@ -194,9 +194,13 @@ class ReviewReport:
     @property
     def blocking(self):
         """
-        要不要拦住不落盘。
+        还有没有没解决的问题。
 
-        tolerable 不拦：它已经提示过了，拦着也改不动。
+        **注意：它不再决定「出不出文件」。** v1.0.9 起一律出图，这个名字
+        沿用下来只是因为它在报告里表示「这份不正干净」，别再拿它当落盘开关。
+
+        tolerable 也不算「干净」：印章、水印没处理就是没处理，
+        文件照出，但清单里得有它。
         """
         return any(it.category != "tolerable" for it in self.issues)
 
@@ -244,7 +248,9 @@ class ReviewReport:
         names = {"blank": "空白块", "residue": "原文未处理",
                  "coverage": "整页无译文", "number": "数值可疑", "ai": "语义可疑"}
         parts = " · ".join(f"{names.get(k, k)} {v} 处" for k, v in by.items())
-        return f"第 {self.round} 轮复核未通过：{parts}"
+        # 「已出图」必须写在前面：v1.0.9 起复核不再拦文件，
+        # 只报「未通过」会让人以为白跑一趟，其实文件已经在文件夹里了
+        return f"第 {self.round} 轮复核未通过（文件已照常生成）：{parts}"
 
     def tolerable_lines(self):
         """
@@ -281,7 +287,9 @@ class ReviewReport:
                     out.append(f"  ……另有 {len(self.notes) - 20} 处未列出")
             return out
         out.append("")
-        out.append("以下问题在输出前被拦下，文件没有生成：")
+        # 这句话决定用户下一步做什么：v1.0.9 起文件已经生成了，
+        # 再写「文件没有生成」会让他去文件夹里翻半天找不存在的东西
+        out.append("文件已生成，但以下位置没有处理好，请对照原图核对：")
         for it in self.issues[:limit]:
             out.append(it.line())
         if len(self.issues) > limit:
@@ -295,7 +303,8 @@ class ReviewReport:
                         "多为该处空间太窄、字号缩到不可读。可把那条标注手动删短后重跑。")
         if by.get("residue"):
             tips.append("「原文未处理」说明页面上还留着没翻的字，"
-                        "常见于图形里的文字（转曲、印章、水印）或识别漏掉的碎片。")
+                        "常见于图形里的文字（转曲、印章、水印），或框太窄放不下译文；"
+                        "这类位置在本文件里保留原文，需要的话可手工补译。")
         if by.get("coverage"):
             tips.append("整页没有译文，通常是该页没有可识别文字，或识别通道没跑通。")
         if by.get("number") or by.get("ai"):

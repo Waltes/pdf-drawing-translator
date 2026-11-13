@@ -326,6 +326,22 @@ EN = {
     "系统中文字体": "System Chinese font",
     "输出前复核": "Pre-output review",
     "复核打回重译": "Review reject → retranslate",
+
+    # v1.0.9：复核不再拦文件，改为出图 + 清单
+    "   文件已生成，上面这些位置保留了原文，清单也写进了输出文件夹。":
+        "   The file was produced. The spots above keep the original text; "
+        "the same list is in the output folder.",
+    "复核发现的位置：": "Spots flagged by the review:",
+    "文字层折行": "Text-layer line wrapping",
+    "复核不过也出文件": "Review failure still produces a file",
+    "   一条都没有译成，输出的文件仍是原文，清单见文件夹内「未译清单」。":
+        "   Nothing was translated — the output still reads as the source. "
+        "See the untranslated list in the output folder.",
+    "   没有找到可翻译的文字，输出的文件与原件内容相同。":
+        "   No translatable text was found — the output is identical to the original.",
+    "没有产出文件。原因见上方日志：若显示转换出错，请把该段内容发给开发者。":
+        "No file was produced. See the log above for the reason; if it says "
+        "conversion failed, send that section to the developer.",
     "不可译内容放行": "Untranslatable content allowed",
     "英文词表已载入": "English dictionary loaded",
     "读取 PDF": "Read PDF",

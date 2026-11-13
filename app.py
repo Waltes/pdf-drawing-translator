@@ -2258,23 +2258,32 @@ class App(GlassWindow):
                                        # 残留检查会静默失效，等于这次复核白跑
                                        dst_lang=self.translator.dst_lang,
                                        reviewer=self.translator)
-                # 复核没过：引擎根本不会落盘，这里不能报「完成」，
-                # 也不能把它记进产出清单 —— 否则用户以为拿到文件了，
-                # 去文件夹一看是空的，比直接说清楚更糟。
+                # 复核还有没解决的问题：v1.0.9 起**不再拦文件**，文件照常生成，
+                # 这里把清单完整打出来，让用户知道哪几处要自己看。
+                # 早先的做法是「不过就不出文件」，实际用下来很糟 ——
+                # 那些打回的位置恰恰是用户改不动的（一格 8pt 宽的版本号、
+                # 印章里的汉字），他反复重跑，每次都只拿到一句「请处理后重跑」。
                 review = stats.get("review")
-                if stats.get("blocked"):
-                    if review is not None:
-                        for line in review.lines():
-                            self.msg_q.put(("log", (line, "warn")))
+                if stats.get("review_unresolved") and review is not None:
+                    for line in review.lines():
+                        self.msg_q.put(("log", (line, "warn")))
                     self.msg_q.put(("log", (
-                        T("   这份文件没有生成。处理上述问题后重跑即可。"), "err")))
-                    continue
+                        T("   文件已生成，上面这些位置保留了原文，"
+                          "清单也写进了输出文件夹。"), "warn")))
                 # 一条都没译出来时不能报「完成」：用户会以为成功了，
                 # 拿着跟原文一样的文件继续往下走，最后发给客户才发现。
+                # 注意文件仍然会生成（v1.0.9 起复核不拦文件），
+                # 所以话要说准：是「没找到要译的字」还是「一条都没译成」，
+                # 两者对用户意味着完全不同的下一步。
                 if not stats.get("translated") and not stats.get("image_texts"):
-                    self.msg_q.put(("log", (
-                        T("   未发现可翻译的文字，这份文件没有生成有效译文。"),
-                        "warn")))
+                    if stats.get("targets"):
+                        self.msg_q.put(("log", (
+                            T("   一条都没有译成，输出的文件仍是原文，"
+                              "清单见文件夹内「未译清单」。"), "warn")))
+                    else:
+                        self.msg_q.put(("log", (
+                            T("   没有找到可翻译的文字，输出的文件与原件内容相同。"),
+                            "warn")))
                 else:
                     self.msg_q.put(("log", (
                         i18n.fmt("   完成：{a}/{b} 条已译 · 段落合并 {c} 处 · "
@@ -2286,7 +2295,10 @@ class App(GlassWindow):
                 # 复核结果要单独交代一句：用户得能确认「这份是核过才出的」，
                 # 而不是又要自己翻一遍文件去找空白块
                 if review is not None:
-                    self.msg_q.put(("log", ("   " + review.summary(), "ok")))
+                    # 未通过时用告警色：这句话里写着「文件已照常生成」，
+                    # 但底色是绿的会让人以为一切正常
+                    self.msg_q.put(("log", ("   " + review.summary(),
+                                            "warn" if review.blocking else "ok")))
                     # 打回重译过的要说明白：用户看到「重译过 5 处」才知道
                     # 这份文件不是一次就过的，哪些地方值得自己再看一眼
                     if len(review.history) > 1:
@@ -2362,6 +2374,13 @@ class App(GlassWindow):
                                 f.write(i18n.fmt("第 {p} 页  {t}", p=pg, t=txt) + "\n")
                         else:
                             f.write(T("全部译出，没有未译条目。") + "\n")
+                        # 复核判出来的问题写进同一份清单。用户只需要看一个文件
+                        # 就知道「哪里没翻、哪里要自己核」，拆成两份反而会漏看 ——
+                        # 这份清单本来就是拿来对照原图逐处核的。
+                        if review is not None and review.issues:
+                            f.write("\n\n" + T("复核发现的位置：") + "\n")
+                            for line in review.lines():
+                                f.write(line + "\n")
                 except Exception:
                     pass
                 if miss:
@@ -2491,7 +2510,12 @@ class App(GlassWindow):
             "none": T("（没有可换算的数值，标注版与翻译版完全一样，未单独生成）"),
         }
         if not folders:
-            self._say("\n" + T("没有产出文件。可能是 PDF 里没有可翻译的文字。"), "warn")
+            # v1.0.9 起复核不再阻断，正常流程一定会有文件夹产出。
+            # 走到这里只剩两种情况：文件真的没有可译文字，或者中途出了异常 ——
+            # 不能再写成「可能是 PDF 里没有可翻译的文字」，那会把异常盖成误判，
+            # 用户看到「译了 8 条」配「没有可翻译的文字」只会更糊涂。
+            self._say("\n" + T("没有产出文件。原因见上方日志："
+                               "若显示转换出错，请把该段内容发给开发者。"), "warn")
             return
         self._say("\n" + i18n.fmt("全部完成，{n} 套图纸已生成：", n=len(folders)), "ok")
         for d in folders:
@@ -2831,6 +2855,77 @@ def _selftest():
                   f"提示 {len(_rep4.tolerable)} 处")
         except Exception as exc:
             check(T("不可译内容放行"), False, f"{type(exc).__name__}: {exc}")
+
+        # 折行：中文两个字换成英文九字符，框只有二十几点宽。
+        # 单行硬塞要靠把字缩到 2pt，等于没写；折两行能把字号抬一倍。
+        # 这里验的是排版判定本身 —— 真写下去要连版面一起看，那靠 tools_test_retry。
+        try:
+            _d5 = pymupdf.open()
+            _p5 = _d5.new_page(width=320, height=200)
+            _g5 = pdf_engine.TextGroup()
+            _g5.text = "门板"
+            _g5.rect = pymupdf.Rect(40, 40, 64, 52)     # 24pt 宽、12pt 高
+            _g5.origin = pymupdf.Point(40, 50)
+            _g5.size = 12
+            _g5.angle = 0
+            _g5.color = 0
+            _plan5 = pdf_engine.plan_group(_g5, "DOOR PANEL",
+                                           pdf_engine.text_obstacles(_p5))
+            _lines5 = _plan5.get("lines") or []
+            _font5 = _plan5["font"]
+            _wide5 = max((_font5.text_length(ln, fontsize=_plan5["size"])
+                          for ln in _lines5), default=0)
+            _d5.close()
+            check(T("文字层折行"),
+                  _plan5["fits"] and len(_lines5) == 2
+                  and _wide5 <= _g5.rect.width * 1.1 + 0.5,
+                  f"字号={_plan5['size']:.1f} · 行数={len(_lines5)} · "
+                  f"最宽={_wide5:.1f}pt / 框宽={_g5.rect.width:.1f}pt")
+        except Exception as exc:
+            check(T("文字层折行"), False, f"{type(exc).__name__}: {exc}")
+
+        # 复核不过也要出文件：这是 v1.0.9 的核心规矩。
+        # 早先「不过就不出文件」，遇上改不动的位置（窄到 8pt 的版本号格、
+        # 印章里的汉字）用户会反复重跑却永远拿不到东西。
+        try:
+            _src6 = os.path.join(tmp, "must_out_in.pdf")
+            _out6 = os.path.join(tmp, "must_out_out.pdf")
+            _d6 = pymupdf.open()
+            _p6 = _d6.new_page(width=320, height=200)
+            _p6.insert_font(fontname="cjk", fontfile=cjk_font)
+            _p6.insert_text((50, 55), "托盘承重五百公斤", fontname="cjk",
+                            fontsize=12)
+            _d6.save(_src6)
+            _d6.close()
+
+            class _NeverOK:
+                """永远给回中文的替身：三轮都改不对，只能靠「照出图 + 清单」"""
+                dst_lang = "en"
+                metric_report = None
+
+                def translate_many(self, items, max_workers=12, progress=None):
+                    return [t for t, _l in items]
+
+                def review_candidates(self, limit=30):
+                    return []
+
+                def retranslate(self, items):
+                    return ["仍未译出" for _ in items]
+
+            _tr6 = _NeverOK()
+            _st6 = {}
+            pdf_engine.process_pdf(_src6, _out6, _tr6, render_preview=False,
+                                   translate_batch=_tr6.translate_many,
+                                   scan_images=False, stats_out=_st6,
+                                   dst_lang="en", reviewer=_tr6, verify=True)
+            _made6 = os.path.exists(_out6)
+            check(T("复核不过也出文件"),
+                  _made6 and bool(_st6.get("review_unresolved")),
+                  f"文件{'已生成' if _made6 else '未生成'} · "
+                  f"遗留 {len(_st6.get('review').issues) if _st6.get('review') else 0} 处 · "
+                  f"未译 {len(_st6.get('untranslated') or [])} 条")
+        except Exception as exc:
+            check(T("复核不过也出文件"), False, f"{type(exc).__name__}: {exc}")
 
         # 反方向：公制 → 英制。这是新增的输出单位，主链路里最容易接线漏掉的一环
         # （换算通了但单位声明没改、标注版标错单位，都属于这里能抓到的问题）

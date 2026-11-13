@@ -25,6 +25,9 @@ import re
 import pymupdf
 
 from .paths import DATA_DIR
+# 折行规则与文字层共用一套（core/textfit.py）。两边各写一份的话，
+# 同一张图上一样宽的框会出现「一处折行、一处留白」的不一致。
+from . import textfit
 
 # OCR 组件与 numpy 都改成惰性加载（首次真正要用图像模式时才导入）。
 #
@@ -514,11 +517,27 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None):
     #                    和旁边的标注明显不成比例，一眼看出是后贴的
     # 注意不能卡太死：标题字 28pt、译文变长后缩到 11pt 是正常排版，
     # 按 45% 卡会把这类正常情况全部拒掉（试过，整页中文一条都写不出来）。
-    if size < max(MIN_WRITE_SIZE, glyph_h * 0.25):
+    #
+    # v1.0.9：判「太小」之前先试折两行。中文「门板」两个字变成
+    # DOOR PANEL 九个字符，14pt 宽的框里单行无论怎么缩都是 2.5pt —— 等于没写；
+    # 折成两行能把字号抬到 5pt，读得出，还在原来那块被盖住的区域里。
+    lines = None
+    thresh = max(MIN_WRITE_SIZE, glyph_h * 0.25)
+    if size < thresh and not vertical:
+        # 第二行只能往上借空间，借多少有硬上限：可用高度就是原框高度
+        # （多给 15% 余量）。OCR 框本来就贴着字，往上多写一行就会
+        # 越过被盖住的区域，压到上面那行原文上 —— 那比不译更难看。
+        # 上限给 glyph_h（原文字高）而不是当前这个已经缩小的 size：
+        # 折行的意义就是把字号抬回来，拿缩小的值当上限等于白折
+        plan = textfit.wrap_fit(font, out, glyph_h, r.width,
+                                glyph_h * 1.15)
+        if plan:
+            size, lines = plan
+    if size < thresh:
         if untranslated is not None:
             untranslated.append(("图片内文字", c["text"]))
         return None
-    return (c, out, fill, size, font)
+    return (c, out, fill, size, font, lines)
 
 
 def paint_plans(page, plans, report=None):
@@ -533,13 +552,13 @@ def paint_plans(page, plans, report=None):
         return 0
 
     # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
-    for c, _out, fill, _size, _font in plans:
+    for c, _out, fill, _size, _font, _lines in plans:
         page.draw_rect(fill, color=None,
                        fill=tuple(float(v) / 255 for v in c["bg"]), width=0)
 
     # 第二轮：写译文
     changed = 0
-    for c, out, _fill, size, font in plans:
+    for c, out, _fill, size, font, lines in plans:
         tw = pymupdf.TextWriter(page.rect)
         color = tuple(float(v) / 255 for v in c["fg"])
         if c.get("vertical"):
@@ -551,6 +570,16 @@ def paint_plans(page, plans, report=None):
             pivot = pymupdf.Point(c["rect"].x1, c["rect"].y1)
             tw.append(pivot, out, font=font, fontsize=size)
             tw.write_text(page, color=color, morph=(pivot, pymupdf.Matrix(90)))
+        elif lines and len(lines) > 1:
+            # 折行：末行贴原框底，其余往上叠。与文字层用同一套落点规则，
+            # 两处对不上的话，同一张图上折出来的行距会一紧一松。
+            gap = size * textfit.WRAP_LINE_LEAD
+            for k, seg in enumerate(lines):
+                base = pymupdf.Point(
+                    c["rect"].x0, c["rect"].y1 - (len(lines) - 1 - k) * gap)
+                tw2 = pymupdf.TextWriter(page.rect)
+                tw2.append(base, seg, font=font, fontsize=size)
+                tw2.write_text(page, color=color)
         else:
             tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
                       font=font, fontsize=size)

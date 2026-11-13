@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.0.8
+Version 1.0.9
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.0.8.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.0.9.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -422,6 +422,31 @@ Text coverage: 150 to translate, 114 translated (5 from bitmaps), 36 untranslate
 - Reasons for missing items include busy backgrounds that were not repainted, sentences
   that failed the checks, and OCR failures on scans. See section 11.
 
+#### When the box is too narrow: wrap first, keep the source as a last resort
+
+There is an unavoidable conflict in drawings: 「门板」is two Chinese characters, its English
+rendering `DOOR PANEL` is nine, and the cell is fourteen points wide. Forcing it in means a
+2.5pt font — printed, that is a grey smudge, which is the same as not writing anything.
+
+So the program tries these in order, moving on only when the previous one fails:
+
+1. **One line fits** → write one line, shrinking the font a little if needed (up to 1.25×
+   the box width; drawing labels usually have whitespace around them).
+2. **One line does not fit** → **wrap into two lines**. Breaks only between words and between
+   CJK characters, never inside a word (`DOOR` is never split into `DOO` / `R`). Measured, this
+   lifts the font from 2.5pt to about 4.8pt, which is readable.
+3. **No room above for a second line** → do not wrap. The second line would sit on top of the
+   line above, which is harder to notice than a missing translation.
+4. **Still does not fit after wrapping** (a box only 8pt wide, say) → **keep the source text**
+   and record the item in the untranslated list.
+
+Point 4 is the important one: **the program never writes an overflowing translation**. The
+earlier version kept writing after hitting the minimum font size, producing text twice as wide
+as the cell and covering the labels to its right — far worse than "this spot is not translated".
+
+The text layer (vector text) and text inside images (OCR) share the same wrapping rules, so two
+equally wide boxes on one drawing are laid out the same way.
+
 ### 5.5 Review before the file is written, and automatic retranslation
 
 After the translations are written back and before the file is saved, the whole document is
@@ -431,11 +456,18 @@ checked once more. The full flow is:
 detect → translate → review ─┬─ pass ─────────────────→ output
                              └─ problems → retranslate → review → …
                                               ↑__ up to 3 rounds __|
-                      still failing after 3 rounds → no file, report only
+                      still failing after 3 rounds → output anyway, list what is left
 ```
 
 **A failed review does not simply give up — the offending items are sent back for
 retranslation**, and the document is reviewed again afterwards.
+
+**After three rounds the file is produced anyway.** Every spot that could not be fixed is
+written into the untranslated list, so you can decide whether the drawing is good enough.
+The earlier behaviour was "no file when the review fails", which turned out to be worse in
+practice: the rejected spots are exactly the ones you cannot do anything about (a version
+cell 8pt wide, Chinese characters inside a stamp), so you reran the file over and over and
+only ever got "fix the items above and run again".
 
 Five things are checked:
 
@@ -495,19 +527,17 @@ The following were left in place as untranslatable content (stamps, watermarks, 
 #### When it genuinely cannot be fixed
 
 ```
-Review result: round 3 failed: 2 items still in the source language
+Review result: round 3 failed (file produced anyway): 2 items still in the source language
 Review rounds: round 1: 3 problems, 3 retranslatable, 3 written → round 2: 2 problems, 2 retranslatable, 0 written
 
-Blocked before writing, no file was produced:
+The file was produced, but these spots were not handled — check them against the source:
   Page 2 · leftover: 2根5毫米厚镀锌铁板2.79米长  — this line was not translated
   Page 4 · leftover: 2根5毫米厚镀锌铁板2.79米长  — this line was not translated
-
-  No file was produced. Fix the items above and run again.
 ```
 
-The usual fix is to shorten that piece of text in the original drawing, or write it in a form
-that can be recognised, then run again. The program would rather produce nothing than hand
-over a drawing with a leftover sentence or a blank patch.
+**The file is in the folder, and those two spots still show the source text** — not a blank
+patch. The same list is written into the 【未译清单】 text file, so you can print it and go
+through the drawing spot by spot.
 
 A second, non-blocking category — reference notes — appears in the log without stopping the
 run. Example: the number of units in a line does not match. That check counts unit symbols,
@@ -829,7 +859,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.0.8.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.0.9.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

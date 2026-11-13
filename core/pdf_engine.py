@@ -19,6 +19,7 @@ import pymupdf
 from . import image_text
 from . import i18n
 from . import paragraph as paragraph_mod
+from . import textfit
 from . import review as review_mod
 # 单位换算的判定要和翻译层用同一套规则，不能各写一份：
 # 「这条原文里有没有会被换算的量」直接问翻译层要答案，
@@ -71,7 +72,14 @@ ASCII_ONLY_RE = re.compile(r"[\x00-\x7f]*\Z")
 
 # 图纸上有一类文字根本不该翻译：图号（BR-01）、修订号（E）、日期、纯型号。
 # 它们不是"没翻"，而是"不需要翻"，混进未译清单会让覆盖率看起来很差，也会误导用户。
-ID_ONLY_RE = re.compile(r"^(?:[A-Z]{1,4}[-\s]?\d+[A-Za-z0-9\-\/\.]*|[A-Z]|[A-Z](?:-[A-Z])+|\d+[A-Za-z]{0,2})$")
+#
+# 最后那个 `[A-Za-z]{1,2}\d{1,3}` 是 v1.0.9 补的：图签栏里的版本号
+# 就是 "v1" 这种「一两个字母 + 一两位数字」的短代号。它原来没被认出来，
+# 被送去翻译后要写进一格 7.9pt 宽、12pt 高的格子里 —— 中文"版本1"怎么排
+# 都塞不下，硬写会横向溢出两倍盖住右边。代号本来就该原样留着。
+# 刻意只收 1-2 个字母：放宽到 4 个会把 page1、item2 这类正常英文也算成代号。
+ID_ONLY_RE = re.compile(r"^(?:[A-Z]{1,4}[-\s]?\d+[A-Za-z0-9\-\/\.]*|[A-Z]|[A-Z](?:-[A-Z])+"
+                        r"|\d+[A-Za-z]{0,2}|[A-Za-z]{1,2}\d{1,3})$")
 
 
 def is_identifier(text: str) -> bool:
@@ -352,6 +360,122 @@ def fit_font_size(font, text, base_size, max_len, min_scale=0.62, overflow=1.25)
     return max(scaled, base_size * min_scale)
 
 
+# ---------------------------------------------------------------------------
+# 折行：单行放不下时换两行
+# ---------------------------------------------------------------------------
+# 图纸上有一个绕不过去的矛盾：中文「门板」两个字，译成英文是 DOOR PANEL 九个字符，
+# 而那个格子只有 14pt 宽。硬缩字号能把字塞进去，但 2.5pt 的字等于没写 ——
+# 打印出来是一道灰线。折成两行能把可用字号抬近一倍（实测 2.5pt → 4.8pt），
+# 代价是多占一行高度。
+#
+# 三条约束缺一不可，少一条都会把图纸搞坏：
+#   1. 只在词边界断行（中文、日文、韩文可以逐字断），绝不把 DOOR 劈成 DOO / R；
+#   2. 最多两行，两行总高不超过上面的净空；
+#   3. 上方没有空间就不折 —— 折出来的第二行会压到上面那一行字，
+#      比「这处没翻译」难看得多，也更难发现。
+# 折行规则放在 core/textfit.py：文字层和位图层共用同一套，不做两份。
+# 同一份图纸里两处一样宽的框，一处折行一处留白，看着就不可信。
+WRAP_MAX_LINES = textfit.WRAP_MAX_LINES
+WRAP_LINE_LEAD = textfit.WRAP_LINE_LEAD
+WRAP_MIN_SIZE = textfit.WRAP_MIN_SIZE
+wrap_tokens = textfit.tokens
+wrap_text = textfit.wrap_text
+wrap_fit = textfit.wrap_fit
+
+# 单行算完仍然超框宽这么多倍，就判「写不下」，保留原文。
+# 1.4 的来由：正常标注允许 1.25 倍溢出（fit_font_size 的默认值），
+# 再大就会盖到相邻文字或尺寸线上，宁可这处保留原文。
+FIT_MAX_RATIO = 1.4
+
+
+def text_obstacles(page, extra=()):
+    """
+    页面上「已有文字」的位置，用来判断某条标注上方还有多少净空。
+
+    只看文字，不看线条。线条（表格框、尺寸线）取不到稳定语义，
+    把它们也算进来会让绝大多数标注都不敢折行 —— 图纸全是线。
+    文字是真正会被压住看不清的东西，先保住它。
+    """
+    rects = []
+    try:
+        for b in page.get_text("dict").get("blocks", []):
+            if b.get("type") != 0:
+                continue
+            for ln in b.get("lines", []):
+                for sp in ln.get("spans", []):
+                    if str(sp.get("text", "")).strip():
+                        rects.append(pymupdf.Rect(sp["bbox"]))
+    except Exception:
+        pass
+    for r in extra:
+        if r is not None:
+            rects.append(pymupdf.Rect(r))
+    return rects
+
+
+def _room_above(rect, obstacles, limit):
+    """这条标注正上方到最近文字之间的净空高度，最多按 limit 算"""
+    room = limit
+    for r in obstacles:
+        if r.y1 > rect.y0 + 0.5:               # 只算在头顶上的
+            continue
+        if r.x1 < rect.x0 - 1 or r.x0 > rect.x1 + 1:   # 横向不重叠的不挡路
+            continue
+        room = min(room, rect.y0 - r.y1)
+    return max(room, 0.0)
+
+
+def plan_group(g, text, obstacles=()):
+    """
+    给一条标注排版：单行 / 折两行 / 写不下。
+
+    返回 {"g","text","font","size","lines","fits","why"}。
+    fits=False 表示无论怎么排都写不下，调用方**必须保留原文** ——
+    擦了又写不上，原位就成一块空白，比「这里没翻译」糟得多。
+
+    判断顺序是「先看实际宽度」，不看字号数字：
+    fit_font_size 有 0.62 的字号下限，极端窄框里它返回的字号看着不小，
+    实际写出来却溢出两倍（SledBox 的 v1 那格就是这么坏的 ——
+    7.9pt 的框写 6.2pt 的字，实际宽 16pt）。所以这里一律按算完的
+    实际宽度判，字号只是中间量。
+    """
+    font = font_for(text)
+    # 可排版长度：竖排（90°/270°）的文字沿纵向伸展，其余按横向宽度算。
+    # 这里不能用 abs(angle) >= 0.5 一刀切 —— 180° 是「倒着写的横排」，
+    # 排版长度仍然是宽度，按高度算会把它当成极窄的框误判写不下。
+    ang = abs(g.angle) % 180
+    quarter = 45 <= ang <= 135
+    box = g.rect.height if quarter else g.rect.width
+    out = {"g": g, "text": text, "font": font, "size": g.size,
+           "lines": None, "fits": True, "why": ""}
+    if box <= 0:
+        return out
+
+    size = fit_font_size(font, text, g.size, box)
+    need = font.text_length(text, fontsize=size)
+    if need <= box * FIT_MAX_RATIO:
+        out["size"] = size
+        return out
+
+    # 单行怎么都超标 → 试折两行。
+    # 只有正放的横排才折：折出来的第二行要靠基线偏移往上叠，
+    # 标转了一定角度后这个偏移方向就不对了，折歪是一片斜着重叠的字，
+    # 比缩字号危险。旋转标注一律老老实实缩字号。
+    if abs(g.angle) < 0.5:
+        # 可用高度 = 自己这行的高度 + 上方净空（封顶 2 倍字高：
+        # 再往上的空间多半已经越过了表格线，占用会压到别的格子）
+        room = min(g.rect.height + _room_above(g.rect, obstacles, 3.0 * g.size),
+                   g.rect.height * 2.0 + 2.0)
+        plan = wrap_fit(font, text, g.size, box * 1.1, room)
+        if plan:
+            out["size"], out["lines"] = plan
+            return out
+
+    out["fits"] = False
+    out["why"] = "框太窄，译文放不下"
+    return out
+
+
 def write_paragraph(page, lines, new_text):
     """
     整段译文写回：按原来的行数、每行宽度重新断行，再逐行放回原来的 baseline。
@@ -400,32 +524,45 @@ def write_paragraph(page, lines, new_text):
             round(size, 1) != round(lines[0].size, 1))
 
 
-def write_groups(page, entries):
+def write_groups(page, entries, obstacles=None, plans=None, skipped=None):
     """
     把译文写回原位。
     entries: [(TextGroup, 新文字), ...]
     返回 [(原文, 译文, 是否缩字号)，...] 供界面展示
 
+    obstacles  页面上其它文字的位置，折行前要确认上方真放得下第二行
+    plans      已经排好版的清单。主流程会先排一遍再决定擦哪些 ——
+               擦除不可逆，擦了才发现写不上，原位就是一块空白
+    skipped    回填装不下的条目 [(TextGroup, 译文, 原因)]，
+               调用方据此把它们记进未译清单，原文留在页面上不动
+
     字号一致性处理：图纸对字号统一很讲究，同一段落里三行字如果大小不一，
     一眼就能看出是后贴的。所以先算出每条需要多大字号，再把「原始字号相同」
     的标注统一成一个字号，避免译文长短不同导致字号参差。
     """
-    # ---- 第一轮：计算每条在保持可读的前提下需要多大字号 ----
-    plan = []
-    for g, new_text in entries:
-        if not new_text:
-            continue
-        # 旋转文字的可排版长度是纵向跨度，水平文字是横向宽度
-        box_len = g.rect.width if abs(g.angle % 180) < 1 else g.rect.height
-        font = font_for(new_text)
-        size = fit_font_size(font, new_text, g.size, box_len)
-        plan.append({"g": g, "text": new_text, "font": font, "size": size})
+    # ---- 第一轮：排版（单行 / 折两行 / 写不下）----
+    if plans is None:
+        if obstacles is None:
+            obstacles = text_obstacles(page, [g.rect for g, _ in entries])
+        plans = [plan_group(g, text, obstacles)
+                 for g, text in entries if text]
+
+    writeable = []
+    for p in plans:
+        if p["fits"]:
+            writeable.append(p)
+        elif skipped is not None:
+            skipped.append((p["g"], p["text"], p["why"]))
 
     # ---- 第二轮：同一段落内的标注统一字号 ----
     # 只按「原始字号」整页统一是错的：标题栏的小字会被技术要求的长行连累一起缩小。
     # 所以再按纵向距离做一次聚类，只在真正相邻（同一段落）的标注之间统一。
+    # 折过行的条目不参与：它的字号已经是为了塞进那块地方能用的最大值，
+    # 再往下压就白折了。
     by_size = {}
-    for item in plan:
+    for item in writeable:
+        if item["lines"]:
+            continue
         key = round(item["g"].size * 2) / 2      # 按 0.5pt 取整分组
         by_size.setdefault(key, []).append(item)
 
@@ -463,17 +600,31 @@ def write_groups(page, entries):
 
     # ---- 第三轮：写回 ----
     report = []
-    for it in plan:
+    for it in writeable:
         g, new_text, font, size = it["g"], it["text"], it["font"], it["size"]
-        tw = pymupdf.TextWriter(page.rect)
-        tw.append(g.origin, new_text, font=font, fontsize=size)
-
         color = _int_to_rgb(g.color)
-        if abs(g.angle) < 0.5:
-            tw.write_text(page, color=color)
+        lines = it["lines"]
+
+        if lines and len(lines) > 1:
+            # 折行写回：最后一行落在原 baseline 上，其余逐行往上叠。
+            # 落点必须从原基线往上算，不能从原框顶往下排 ——
+            # 往上叠才能保证末行与原文字对齐，折歪的观感最轻。
+            gap = size * WRAP_LINE_LEAD
+            for k, seg in enumerate(lines):
+                base = pymupdf.Point(
+                    g.origin.x, g.origin.y - (len(lines) - 1 - k) * gap)
+                tw = pymupdf.TextWriter(page.rect)
+                tw.append(base, seg, font=font, fontsize=size)
+                tw.write_text(page, color=color)
         else:
-            # 任意角度：绕原 baseline 起点旋转，保证与原标注同角度
-            tw.write_text(page, color=color, morph=(g.origin, pymupdf.Matrix(g.angle)))
+            tw = pymupdf.TextWriter(page.rect)
+            tw.append(g.origin, new_text, font=font, fontsize=size)
+            if abs(g.angle) < 0.5:
+                tw.write_text(page, color=color)
+            else:
+                # 任意角度：绕原 baseline 起点旋转，保证与原标注同角度
+                tw.write_text(page, color=color,
+                              morph=(g.origin, pymupdf.Matrix(g.angle)))
 
         report.append((g.text, new_text, round(size, 1) != round(g.size, 1)))
     return report
@@ -804,8 +955,14 @@ def _rewrite_record(doc, rec, new_text):
             erase_text(page, obj)
             write_paragraph(page, obj, new_text)
             return True
+        # 单条标注：**先算能不能写进去，再决定动不动手**。
+        # 顺序反了就是一块白斑 —— 擦完才发现新译文还是塞不下，
+        # 而原文字已经没了，页面上什么都不剩。
+        plan = plan_group(obj, new_text, text_obstacles(page, [obj.rect]))
+        if not plan["fits"]:
+            return False
         erase_text(page, [obj])
-        write_groups(page, [(obj, new_text)])
+        write_groups(page, [(obj, new_text)], plans=[plan])
         return True
     except Exception:
         return False
@@ -922,10 +1079,12 @@ def _review_with_retries(doc, marks, stat, fixes, hint_obj, dst_hint,
     """
     复核 → 不过就打回重译 → 再复核，直到通过、改不动、或轮次用尽。
 
-    返回 (review, blocked)。blocked 为真时调用方不能落盘。
+    返回 (review, unresolved)。unresolved 为真表示「还有没解决的问题」，
+    **但不再是「不许出文件」的意思**：v1.0.9 起一律照常出图，
+    这些位置写进未译清单交给用户核对。理由见 process_pdf 里复核那段。
 
-    这里体现的是 v1.0.8 的流程：检测 → 翻译 → 复核 →（有错）定向重译
-    → 复核 → 出图。复核不再是一个「过 / 不过」的闸门，而是流程中间的一环。
+    这里体现的是 v1.0.8 引入的流程：检测 → 翻译 → 复核 →（有错）定向重译
+    → 复核 → 出图。复核是流程中间的一环，不是最后一次投票。
     """
     # 登记表：{（页码, 去空白原文）: [记录]}。复核就是靠它判断
     # 「这条问题有没有可擦写的框」，有框才谈得上打回重写。
@@ -990,12 +1149,13 @@ def _review_with_retries(doc, marks, stat, fixes, hint_obj, dst_hint,
     rep.round = round_no
     rep.retried = retried
 
-    # 收尾判：还有「可修却没修好」或「本身就不是翻译问题」的，一律拦下。
-    # 只剩「定位不到框」的那批时放行 —— 印章、水印这类技术上没法原位替换，
-    # 一直拦着等于让人永远出不了图；清单照给，由用户决定用不用。
-    blocked = rep.blocking
+    # 收尾判：还有「可修却没修好」或「本身就不是翻译问题」的，记一笔。
+    # 注意这不再是「拦下」—— 调用方照样落盘，只是要把这些位置写明。
+    # 只剩印章水印那批（tolerable）时这里为假：那类技术上没法原位替换，
+    # 界面走「复核通过 + 另行列出无法定位的残留」那条路，不必再喊一遍。
+    unresolved = rep.blocking
     stat["tolerated"] = [it.line().strip() for it in rep.tolerable]
-    return rep, blocked
+    return rep, unresolved
 
 
 def process_pdf(src_path, dst_path, translate_fn, progress=None,
@@ -1031,17 +1191,16 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          压到穿过的线框，属于有损方案。
     verify                               落盘前整份复核（core/review.py），
                                          不过关就打回定向重译，重译后复审。
-                                         最多 _MAX_REVIEW_ROUNDS 轮；三轮回
-                                         仍不过才不出文件。问题清单回填到
-                                         stats_out["review"]，stats_out["blocked"]
-                                         置真。
-                                         只剩「定位不到可擦写框」的残留
-                                         （印章、水印、图形边缘的字）时不阻断，
-                                         清单进 stats_out["tolerated"]，
-                                         文件照常生成 —— 这类技术上没法原位
-                                         替换，拦着只会让人永远出不了图。
-                                         默认开 —— 生成一份带中文残留或
-                                         空白块的文件，比不出文件更糟。
+                                         最多 _MAX_REVIEW_ROUNDS 轮。
+                                         三轮回仍不过**照样出文件**，遗留问题
+                                         回填到 stats_out["review"]，
+                                         stats_out["review_unresolved"] 置真，
+                                         由界面逐条写进未译清单。
+                                         定这个规矩的理由：图纸上总有改不动的
+                                         东西（一格 8pt 宽的版本号、印章里的
+                                         汉字），「不过就不给」只会让人反复
+                                         重跑却永远拿不到文件。文件够不够用
+                                         该由拿着图纸的人判断。
     dst_lang                             产出的目标语言，复核判「残留」要用。
                                          不传就从 reviewer / 批量方法的绑定实例上猜，
                                          猜不到会退回界面语言 —— 那会让残留检查
@@ -1226,6 +1385,34 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                       "rect": _payload_rect(payload),
                                       "out": None, "lang": lang, "mark": None})
 
+            # ---- 写入前排版：装不下的那几条不擦、保留原文 ----
+            # 擦除不可逆。先把「这两行到底塞不塞得进去」算清楚，再决定擦不擦：
+            # 擦了才发现塞不下，原位就留一块空白，比「这里没翻译」糟得多 ——
+            # 空白要等客户翻到那一页才发现，保留原文至少字还在。   
+            single_plans = []
+            if single_entries:
+                obst = text_obstacles(
+                    page, [g.rect for g, _t, _s, _l, _k in single_entries])
+                for g, txt, src, lang, k in single_entries:
+                    p = plan_group(g, txt, obst)
+                    if not p["fits"]:
+                        stat["untranslated"].append((page_no + 1, src))
+                        # 框太窄恰恰是最该重译的理由：让模型给个更短的译法，
+                        # 下一轮也许就塞得进去了。所以照样登记，别一上来就放弃。
+                        if k != "size":
+                            fixes.append({"page": page_no + 1, "kind": "single",
+                                          "obj": g, "src": src, "rect": g.rect,
+                                          "out": None, "lang": lang, "mark": None})
+                        if progress:
+                            progress(page_no + 1, total,
+                                     f"第 {page_no + 1}/{total} 页："
+                                     f"{src[:14]} 框太窄，保留原文")
+                        continue
+                    p["src"], p["lang"], p["kind"] = src, lang, k
+                    single_plans.append(p)
+                single_entries = [(p["g"], p["text"], p["src"], p["lang"], p["kind"])
+                                  for p in single_plans]
+
             if para_entries or single_entries or decl_entries or stale_entries:
                 # 先擦后写，顺序不能反
                 to_erase = []
@@ -1253,8 +1440,11 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                   "lang": lang, "mark": mark})
 
                 if single_entries:
+                    # 排版结果直接传进去：这一步刚算过，重算一遍既慢，
+                    # 又可能因为页面已经擦过而算出不同的可用空间
                     page_report = write_groups(
-                        page, [(g, txt) for g, txt, _s, _l, _k in single_entries])
+                        page, [(g, txt) for g, txt, _s, _l, _k in single_entries],
+                        plans=single_plans)
                     all_report.extend((page_no + 1,) + r for r in page_report)
                     stat["translated"] += len(page_report)
                     for g, txt, src, lang, k in single_entries:
@@ -1311,19 +1501,25 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 stat["untranslated"].append((page_no + 1, item[1]))
 
     # ---------- 输出前复核（含打回重译） ----------
-    # 位置很关键：必须在落盘之前。
-    # 一份带着中文残留或空白块的图纸交到客户手里，比这次没出文件糟得多 ——
-    # 后者当场就能看见，前者要等客户发现。
+    # 位置在落盘之前：复核要回读页面、拿改完还没存的那份去查才有意义。
+    #
+    # v1.0.9 起改了处置方式：**复核再差也出图**。
+    # v1.0.7/1.0.8 是「不过就不出文件」，实际用下来问题很大 ——
+    # 图纸上总有改不动的东西（一格 8pt 宽的版本号、印章里的汉字），
+    # 于是用户反复重跑，每次都拿到一句「处理上述问题后重跑」，
+    # 而那些问题恰恰是他改不动的。既没拿到文件，也没得到可用的东西。
+    # 现在一律落盘，把「哪里没翻译」逐条写进未译清单：
+    # 文件能不能用、哪些地方要自己补，交给拿着图纸的人判断，
+    # 而不是让程序替他决定「没有就不给」。
     if verify:
-        review, blocked = _review_with_retries(
+        review, unresolved = _review_with_retries(
             doc, marks, stat, fixes, hint_obj, dst_hint, progress=progress)
         stat["review"] = review
-        if blocked:
-            stat["blocked"] = True
-            doc.close()     # 内存里已经改好的内容直接丢弃，不落盘
-            if stats_out is not None:
-                stats_out.update(stat)
-            return all_report
+        stat["review_unresolved"] = bool(unresolved)
+        if unresolved and progress:
+            # 必须说清楚「出图了，但有问题」，不能让人以为全干净了
+            progress(0, 0, f"复核仍有 {len(review.issues)} 处未解决，"
+                           f"照常出图，位置写进未译清单")
 
     # 子集化字体，只保留实际用到的字形，避免文件体积暴涨
     try:
