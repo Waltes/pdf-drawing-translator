@@ -1531,10 +1531,13 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          显式传最稳，别指望从 translate_batch 上反推。
     detect_outlined                      逐页查一遍「转曲文字」：导出时被转成
                                          矢量轮廓的字，图上看得见、文字层里没有，
-                                         常规流程够不着。**只检测不改写**，
-                                         结果回填 stats_out["outlined"]
-                                         给未译清单如实交代；整页 OCR 模式下自动跳过
-                                         （那种模式本来就把轮廓字一起处理了）。
+                                         常规流程够不着。
+                                         能对上术语表的就地改成中文，回填
+                                         stats_out["outlined_fixed"]；对不上、
+                                         或框里压着尺寸线的保持原样，回填
+                                         stats_out["outlined"] 给未译清单如实交代。
+                                         整页 OCR 模式下自动跳过（那种模式本来就把
+                                         轮廓字一起处理了）。
     """
     doc = pymupdf.open(src_path)
     total = len(doc)
@@ -1543,8 +1546,9 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             "paragraphs": 0, "unit_decl_fixed": 0, "unit_decl_nonote": 0,
             "metric_marks": 0,
             # 转曲文字（导出时被转成矢量轮廓）：文字层里没有，常规流程够不着。
-            # 这里只记账、不改文件，用来如实告诉用户「还有哪几处是原文」。
-            "outlined": []}
+            # outlined_fixed 是已经就地改成中文的条数；
+            # outlined 是改不动、仍是原文的（对不上术语表、或框里压着线条）。
+            "outlined": [], "outlined_fixed": 0}
     # 写入记录 [{page, rect, out, src}]，供输出前的复核回读校验。
     # 擦除是不可逆的，只有写完再读回来才能证明「这里没有被擦成空白」。
     marks = []
@@ -1868,23 +1872,43 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
             for item in img_misses:
                 stat["untranslated"].append((page_no + 1, item[1]))
 
-        # ---------- 转曲文字：图上看得见，文字层里却没有 ----------
-        # 只检测、不改写。没检出就什么都不说；检出了交给未译清单如实交代 ——
-        # 「全部译出」这句话只有在确实没有残留原文时才成立。
+        # ---------- 转曲文字：图上看得见、文字层里却没有 ----------
+        # 先改写，改不动的照实交代。
+        # 能改的只限「对得上术语表」的那几处：OCR 读空心字会认错字母，
+        # 直接交给模型翻会把错字当真词照译，图上被写进另一个词比留英文更难发现。
+        # 对不上、或填充框里压着尺寸线的，一律不动，记进未译清单。
         #
         # 整页 OCR 模式不用查：那种模式本来就把整页当位图识别，
         # 轮廓字会被当成普通图内文字一并处理掉。
         if detect_outlined and not ocr_full_pages:
+            done = 0
+            left = []
             try:
-                found = image_text.scan_outlined_text(page)
+                done, left = image_text.rewrite_outlined(page)
             except Exception:
-                found = []      # 检测失败就当没发现，绝不据此干扰正常产出
-            if found:
-                stat["outlined"].extend((page_no + 1, text) for _box, text in found)
+                # 改写这条路出任何问题都退回纯检测：至少把「图上还有原文」说出来。
+                # 绝不能因为改写失败就什么都不报 —— 那正是 1.1.0 的老毛病。
+                left, done = [], 0
+                try:
+                    left = image_text.scan_outlined_text(page)
+                except Exception:
+                    left = []
+            if done:
+                stat["outlined_fixed"] += done
                 if progress:
                     progress(page_no + 1, total,
-                             f"第 {page_no + 1}/{total} 页：另有 {len(found)} 处"
-                             f"文字是曲线（转曲），文字层读不到")
+                             f"第 {page_no + 1}/{total} 页：把 {done} 处"
+                             f"曲线文字改成了中文")
+            if left:
+                # 只记进 outlined 这一本账。
+                # 不能同时塞进 untranslated：那本账会被复核当成「页面上残留原文」
+                # 逐条报警并触发重译，而这批字本来就在文字层外，重译一万次也改不动。
+                # 两本账一起记的后果是未译条数翻倍、日志里同一处报两遍。
+                stat["outlined"].extend((page_no + 1, text) for _box, text in left)
+                if progress:
+                    progress(page_no + 1, total,
+                             f"第 {page_no + 1}/{total} 页：另有 {len(left)} 处"
+                             f"文字是曲线（转曲），改不动")
 
     # ---------- 输出前复核（含打回重译） ----------
     # 位置在落盘之前：复核要回读页面、拿改完还没存的那份去查才有意义。

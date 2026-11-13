@@ -408,6 +408,284 @@ def scan_outlined_text(page):
         return []
 
 
+# ---------------------------------------------------------------------------
+# 转曲文字：认得出就就地改成中文
+# ---------------------------------------------------------------------------
+# 为什么改写要先过术语表，而不是把 OCR 结果直接丢给模型：
+# OCR 读空心轮廓字不稳 —— Top view 读成 Top vlew、Side view 读成 Sldo vow
+# （同一份文件里都复现过）。模型会把错字当成正经词照译，于是图上被写进
+# 一个别的词；这种错误比留着英文更难发现，客户要拿图纸去下料。
+# 先对术语表、容忍一两个字母的偏差，既能纠正误读，又不会凭空造词。
+OUTLINE_TERM_RATIO = 0.34     # 模糊匹配的编辑距离上限（按词长比例算，见 _term_close）
+
+
+def _norm_term(text):
+    """归一成比对用的形式：大写、去标点、压空格"""
+    t = (text or "").upper().strip()
+    t = t.replace("—", "-").replace("–", "-").replace("~", "-")
+    t = re.sub(r"[^A-Z0-9 \-/]", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _edit_distance(a, b, cap=4):
+    """编辑距离，超过 cap 就提前返回，省时间（术语表几百条，逐条算得很快）"""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+        if min(cur) > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def _term_close(a, b):
+    """
+    两个术语算不算同一个词（容忍 OCR 的字母误读）。
+
+    距离上限按词长走：Top view（8 字符）容 2 个字符差，
+    能接住 vlew/view、Sldo/Side；SCALE（5 字符）只容 1 个，
+    免得把外形相近的短词认成同一个。
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    longest = max(len(a), len(b))
+    if longest < 4:
+        return False
+    cap = max(1, int(round(longest * OUTLINE_TERM_RATIO)))
+    return _edit_distance(a, b, cap) <= cap
+
+
+# 剖切线标题：A-A、B-B 这类。中文制图习惯写成「A-A 剖视」，
+# 术语表里没有整条，所以单独按格式认。
+_SECTION_RE = re.compile(r"^(?:CUT\s*|SECTION\s*)?([A-Z])\s*-\s*([A-Z])$")
+_SECTION_WORD_RE = re.compile(r"^(CUT|SECTION)\s+([A-Z])\s*-\s*([A-Z])$")
+
+
+def lookup_outline_term(text):
+    """
+    把 OCR 读出来的转曲文字对到一条中文术语上。对不上返回 None。
+
+    对不上就返回 None，由调用方如实报「这一处仍是原文」——
+    宁可留英文，也不往图纸上写没有把握的词。
+    """
+    norm = _norm_term(text)
+    if not norm:
+        return None
+
+    m = _SECTION_WORD_RE.match(norm)
+    if m:
+        return f"{m.group(2)}-{m.group(3)} 剖视"
+    m = _SECTION_RE.match(norm)
+    if m:
+        return f"{m.group(1)}-{m.group(2)} 剖视"
+
+    try:
+        from . import dict_engine
+        en2zh = dict_engine.Glossary().en2zh
+    except Exception:
+        return None
+
+    # 先找完全一致的，再退到模糊匹配。
+    # 顺序不能反：模糊匹配会先撞上「外形相近但意思不同」的词条
+    # （VIEW 撞上 VALVE 之类），完全一致的那条反而轮不到。
+    hit = en2zh.get(norm)
+    if hit:
+        return hit
+    for en, zh in en2zh.items():
+        if _term_close(norm, en):
+            return zh
+    return None
+
+
+def _seg_hits_rect(p1, p2, r):
+    """
+    线段有没有穿过矩形内部（Liang-Barsky 裁剪）。
+
+    为什么不直接用外接矩形判相交：图纸边框是一根覆盖整页的大矩形，
+    它的外接框和每个标题框都相交，按外接框判会把全部标题误判成「压线」。
+    只有按真实线段算，边框那四条边才会正确地判为不穿过标题。
+    """
+    x0, y0 = float(p1[0]), float(p1[1])
+    x1, y1 = float(p2[0]), float(p2[1])
+    dx, dy = x1 - x0, y1 - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - r.x0), (dx, r.x1 - x0),
+                 (-dy, y0 - r.y0), (dy, r.y1 - y0)):
+        if abs(p) < 1e-9:
+            if q < 0:
+                return False        # 平行且在框外
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return False
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return False
+            t1 = min(t1, t)
+    return t1 - t0 > 1e-6
+
+
+def _item_points(item):
+    """把一条绘图指令里的控制点都取出来（不同 op 的点位不同）"""
+    op = item[0]
+    if op in ("l", "re", "qu"):
+        return []
+    pts = []
+    for v in item[1:]:
+        if isinstance(v, pymupdf.Point):
+            pts.append((v.x, v.y))
+        elif isinstance(v, (tuple, list)) and len(v) == 2:
+            pts.append((float(v[0]), float(v[1])))
+    return pts
+
+
+def _covered_line_art(drawings, fill):
+    """
+    填充框里除了这行字自己的笔画，还压着什么别的东西没有。
+
+    为什么要这道关：改写是拿背景色把整块盖掉再写中文。
+    框里若有尺寸线、剖切线穿过，盖完就断了 —— 图上看着像凭空少了根线。
+    所以先问一遍：有没有哪一笔真的穿过了这个框（不是外接框相交，是线段穿过）。
+    有就放弃这一处，留着英文如实上报，交给用户自己决定要不要手改。
+    """
+    tol = fill.height * 0.30      # 整笔都在这个范围内，视作字形的一笔
+    out = pymupdf.Rect(fill.x0 - tol, fill.y0 - tol,
+                       fill.x1 + tol, fill.y1 + tol)
+    for g in drawings:
+        for item in g.get("items", ()):
+            op = item[0]
+            if op == "re":
+                r = pymupdf.Rect(item[1])
+                if r.intersects(fill) and not (r.contains(fill)
+                                               or fill.contains(r)):
+                    return True
+                continue
+            pts = _item_points(item)
+            if len(pts) < 2:
+                continue
+            if all(out.contains(pymupdf.Point(p)) for p in pts):
+                continue          # 这一笔整条都在框内，是字自己的笔画
+            for a, b in zip(pts, pts[1:]):
+                if _seg_hits_rect(a, b, fill):
+                    return True
+    return False
+
+
+def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
+    """
+    把这一页的转曲文字就地改成中文。返回 (写成条数, 剩下的原文列表)。
+
+    只处理能对到术语表的那几处；对不上的照旧留着，并计入未译清单。
+    这不是「智能翻译」，是有边界的改写 —— 边界写在 lookup_outline_term 上。
+    """
+    if not ocr_available():
+        return 0, []
+    hits = scan_outlined_text(page)
+    if not hits:
+        return 0, []
+
+    np = _numpy()   # 惰性取的，见模块顶部说明
+    drawings = page.get_drawings()
+    font_cjk = _get_cjk_font()
+    font_latin = pymupdf.Font("helv")
+
+    plans, left = [], []
+    for box, text in hits:
+        term = lookup_outline_term(text)
+        if not term:
+            left.append((box, text))
+            continue
+
+        # 采样底色和字色：底色多半就是纸面的白，字色沿用原来的绿色，
+        # 写成中文还是同一个颜色，不突兀
+        h = max(box.height, 1.0)
+        pad = max(h * 1.2, 3.0)
+        clip = pymupdf.Rect(box.x0 - pad, box.y0 - pad,
+                            box.x1 + pad, box.y1 + pad) & page.rect
+        try:
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(4, 4), clip=clip)
+        except Exception:
+            left.append((box, text))
+            continue
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n)
+        rgb = (arr[:, :, :3] if pix.n >= 3
+               else np.repeat(arr[:, :, :1], 3, axis=2)).astype(int)
+        sampled = sample_colors(rgb, box, 4, clip)
+        if not sampled:
+            left.append((box, text))
+            continue
+        bg, fg, _std = sampled
+
+        # 量原字实际的墨迹高度（OCR 框带留白，按框高定字号会大到四成）。
+        # 只在框内找深色像素，框外的线条不参与。
+        ink_h = box.height * 0.72      # 量不出来时的退路：按经验比例估
+        try:
+            z = 4.0
+            bx0 = max(int((box.x0 - clip.x0) * z), 0)
+            by0 = max(int((box.y0 - clip.y0) * z), 0)
+            bx1 = min(int((box.x1 - clip.x0) * z), rgb.shape[1])
+            by1 = min(int((box.y1 - clip.y0) * z), rgb.shape[0])
+            sub = rgb[by0:by1, bx0:bx1]
+            if sub.size:
+                dark = sub.min(axis=2) < 180
+                rows = np.where(dark.any(axis=1))[0]
+                if len(rows) >= 2:
+                    ink_h = (rows[-1] - rows[0] + 1) / z
+        except Exception:
+            pass
+        # 汉字实际字面约占字号 0.86，反推回去才对得上原来的大小
+        hint = min(max(ink_h / 0.86, 3.5), box.height * 1.2)
+
+        cand = {"text": text, "rect": box, "bg": bg, "fg": fg,
+                "hint": "en", "vertical": False}
+        plan = _plan_one(cand, term, None, font_cjk, font_latin,
+                         glyph_h_hint=hint)
+        if plan is None:
+            # 框太窄，中文塞不进去（缩到看不清就等于留下一个白块）
+            left.append((box, text))
+            continue
+        if _covered_line_art(drawings, plan[2]):
+            left.append((box, text))
+            continue
+        plans.append(plan)
+
+    if not plans:
+        for _box, text in left:
+            if untranslated is not None:
+                untranslated.append(("曲线文字", text))
+        return 0, left
+
+    n = paint_plans(page, plans, report)
+
+    # 写完立刻回读：盖掉原文却没写上去，是最难被发现的坏结果
+    # （图上留一块白斑，谁也不会去查）。回读不到就当没写成，退回未译。
+    failed = []
+    for c, out, _fill, _size, _font, _lines in plans:
+        got = page.get_text("text", clip=c["rect"]).replace(" ", "")
+        if got and out.replace(" ", "")[:1] in got:
+            if write_marks is not None:
+                write_marks.append({"page": None, "rect": c["rect"],
+                                    "ink": [c["rect"]], "out": out,
+                                    "src": c["text"]})
+        else:
+            failed.append((c["rect"], c["text"]))
+
+    for box, text in left + failed:
+        if untranslated is not None:
+            untranslated.append(("曲线文字", text))
+    return max(n - len(failed), 0), left + failed
+
+
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
                         force_full=False, write_marks=None, fixes=None):
@@ -577,7 +855,8 @@ def process_page_images(page, translate_fn, used_rects, report,
     return paint_plans(page, plans, report)
 
 
-def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None):
+def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
+              glyph_h_hint=None):
     """
     算出一条图内文字该不该写、写在哪个框里、用多大字号。
 
@@ -605,7 +884,13 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None):
     #   竖排 —— 字高是框宽，排版长度沿框高往上
     # 混用的话，竖排框宽只有十几点，英文译文几百点长，
     # 字号会被压到 1 点出头，等于把一个白块留在图上。
-    glyph_h = r.width if vertical else r.height
+    #
+    # glyph_h_hint：转曲文字改写专用。OCR 框是贴着笔画外接框给的，
+    # 自带不少留白（实测 9pt 的框里字只有 5pt 高），按框高定字号会写成
+    # 比原文大四成的一行字。调用方量出实际墨迹高度传进来，字号才准。
+    # 只影响字号，填充框仍按原框算 —— 盖不干净原文会留叠影。
+    box_h = r.height
+    glyph_h = r.width if vertical else (glyph_h_hint or r.height)
     if vertical:
         maxw = r.height
     else:
@@ -618,7 +903,9 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None):
 
     # 外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
     # 分两轮写之后，外扩大一点也不会吃掉相邻行的译文了。
-    pad = max(min(glyph_h * 0.32, 2.0), 0.6)
+    # 这里按原框高度算（不是按 hint 量出来的字高）：填充框的任务是盖住原文，
+    # 拿缩小的字高去算，外扩跟着变小，原来的笔画就会露一圈。
+    pad = max(min(box_h * 0.32, 2.0), 0.6)
     fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
     # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
     # 宁可留下原文记进未译清单，也不能把图形涂掉

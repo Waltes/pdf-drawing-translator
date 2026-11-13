@@ -2234,6 +2234,10 @@ class App(GlassWindow):
         # 用户选了保持原样、图纸本来就没有要换的数、图像模式定位不到数值。
         # 混成一句「没有可换算的数值」，后两种情况下是错的。
         mark_skip = {}
+        # 本轮曲线文字（转曲）的账：改成了几处、剩下几处仍是原文。
+        # 收尾时要单独说一句 —— 这类字看不见文字层，用户只能靠这句提示
+        # 知道「图上还有没有英文」，埋在中间的日志里等于没说。
+        outline_total = {"fixed": 0, "left": 0}
         mode = self.translator.unit_mode
         try:
             for idx, path in enumerate(batch):
@@ -2444,6 +2448,14 @@ class App(GlassWindow):
                 # 它们也是「没译的」，必须算进未译条数 —— 否则标题写着「共 0 条」，
                 # 图上却明明还有几行英文，这正是客户投诉过的那种自相矛盾。
                 outlined = stats.get("outlined") or []
+                fixed_outline = stats.get("outlined_fixed") or 0
+                outline_total["fixed"] += fixed_outline
+                outline_total["left"] += len(outlined)
+                if fixed_outline:
+                    self.msg_q.put(("log", (
+                        i18n.fmt("   曲线文字：{n} 处已就地改成中文"
+                                 "（这些字是矢量轮廓，文字层里读不到）",
+                                 n=fixed_outline), "ok")))
                 # 未译清单始终写一份：没有未译就写「全部译出」。
                 # 结构保持稳定，用户不用猜「这次是没漏，还是漏了没出清单」。
                 miss_file = plan["untranslated"]
@@ -2465,8 +2477,12 @@ class App(GlassWindow):
                         if outlined:
                             f.write("\n\n" + T(
                                 "曲线文字：导出时被转成了矢量轮廓，图上看得见、"
-                                "文字层里却没有，程序读不到，所以这些位置仍是原文。\n"
-                                "要改只能让制图方重新导出带文字的 PDF；\n"
+                                "文字层里却没有。\n"
+                                "能和术语表对上的，程序已就地改成中文；"
+                                "下面这些改不动，仍是原文 ——\n"
+                                "对不上术语（不敢乱写），或者框里压着尺寸线"
+                                "（盖掉会把线弄断）。\n"
+                                "要改只能让制图方重新导出带文字的 PDF，"
                                 "或者用本程序的图像模式整页重做一遍。\n\n"))
                             for pg, txt in outlined:
                                 f.write(i18n.fmt("第 {p} 页  {t}", p=pg, t=txt) + "\n")
@@ -2481,8 +2497,8 @@ class App(GlassWindow):
                     pass
                 if outlined:
                     self.msg_q.put(("log", (
-                        i18n.fmt("   另有 {n} 处文字是曲线（转曲），文字层读不到，"
-                                 "图上仍是原文：", n=len(outlined)), "warn")))
+                        i18n.fmt("   ✗ 还有 {n} 处曲线文字改不动，图上仍是英文：",
+                                 n=len(outlined)), "warn")))
                     for pg, txt in outlined[:8]:
                         self.msg_q.put(("log", (
                             i18n.fmt("     第{p}页：{t}", p=pg, t=txt[:60]), "dim")))
@@ -2560,7 +2576,7 @@ class App(GlassWindow):
                       "配额按天重置。配好 AI 接口后就不再依赖它。"), "warn")))
             self.translator.save_cache()
             self.msg_q.put(("strip", None))
-            self.msg_q.put(("done", (folders, mark_skip)))
+            self.msg_q.put(("done", (folders, mark_skip, outline_total)))
 
     def _plan_outputs(self, src):
         """
@@ -2604,7 +2620,7 @@ class App(GlassWindow):
             "check": os.path.join(folder, f"{T('【数据校验清单】')}{base}.txt"),
         }
 
-    def _finish(self, folders, mark_skip=None):
+    def _finish(self, folders, mark_skip=None, outline=None):
         """
         收尾展示。folders 是本轮生成的输出文件夹列表。
 
@@ -2617,6 +2633,7 @@ class App(GlassWindow):
         「图像模式定位不到数值」和「这份图纸没有要换的数」是两回事。
         """
         mark_skip = mark_skip or {}
+        outline = outline or {}
         missing_note = {
             "keep": T("（输出单位选了「保持原样」，未生成标注版）"),
             "image": T("（图像模式不生成标注版：原文文字是曲线，定位不到数值位置）"),
@@ -2643,6 +2660,24 @@ class App(GlassWindow):
                 note = missing_note.get(mark_skip.get(d))
                 if note:
                     self._say("    " + note, "dim")
+        # 曲线文字必须在这里再说一遍。这类字是矢量轮廓，文字层里根本没有，
+        # 换句话说「译了几条、覆盖率多少」这些数字都不包含它们 ——
+        # 只在中间的日志里提一句，翻到末尾看到「全部完成」的人会以为都好了。
+        # 客户就是这么踩着坑的：图上明明还有 6 行英文，报告一声没吭。
+        n_done = outline.get("fixed") or 0
+        n_left = outline.get("left") or 0
+        if n_done and not n_left:
+            self._say(i18n.fmt(
+                "曲线文字 {n} 处已就地改成中文（原字是矢量轮廓，文字层里读不到）。",
+                n=n_done), "ok")
+        elif n_left:
+            if n_done:
+                self._say(i18n.fmt("曲线文字：{a} 处已改成中文，但还有 {b} 处改不动 —— "
+                                   "图上仍是英文，逐条列在「【未译清单】」里。",
+                                   a=n_done, b=n_left), "alert")
+            else:
+                self._say(i18n.fmt("⚠ 有 {n} 处曲线文字改不动 —— 图上仍是英文，"
+                                   "逐条列在「【未译清单】」里。", n=n_left), "alert")
         # 最后这条是免责提醒，必须留在用户视线里：机器翻译可能把术语译反，
         # 单位换算可能把公差取整，而用户拿到成品往往直接就用于报价、下单、
         # 加工。放在日志末尾而不是弹窗：弹窗会被顺手点掉，日志行留下来，
@@ -3289,6 +3324,32 @@ def _selftest():
             check(T("转曲文字不误报文字层"), True, T("OCR 组件不可用，跳过"))
     except Exception as exc:
         check(T("转曲文字不误报文字层"), False, f"{type(exc).__name__}: {exc}")
+
+    # 转曲文字就地改写：认字这一步对不对，决定会不会往图上写错词。
+    # OCR 读空心字会把 i 读成 l（Top vlew、Sldo vow 都实测出现过），
+    # 这里钉住「错一个字母也要认回原词」，否则宁可留英文。
+    try:
+        t1 = image_text.lookup_outline_term("Top vlew")
+        t2 = image_text.lookup_outline_term("Cut B - B")
+        t3 = image_text.lookup_outline_term("Zzz qqq")
+        check(T("曲线文字认词不出错"),
+              t1 == "俯视图" and t2 == "B-B 剖视" and t3 is None,
+              f"Top vlew->{t1} Cut B - B->{t2} Zzz qqq->{t3}")
+    except Exception as exc:
+        check(T("曲线文字认词不出错"), False, f"{type(exc).__name__}: {exc}")
+
+    # 文字层里的字不该被这条路碰：它只负责「文字层里没有的那部分」。
+    # 万一误吃进去，等于同一行字被写两遍（叠影），比不译更难看。
+    try:
+        d = pymupdf.open()
+        p = d.new_page(width=320, height=220)
+        p.insert_text((40, 100), "Front view", fontsize=12)
+        n, left = image_text.rewrite_outlined(p)
+        check(T("曲线文字不碰文字层"), n == 0 and not left,
+              f"改写 {n} 处，残留 {len(left)} 处")
+        d.close()
+    except Exception as exc:
+        check(T("曲线文字不碰文字层"), False, f"{type(exc).__name__}: {exc}")
 
     # 本机部署：不填密钥也要能用，而且不该冒出云端费用。
     # 这两条是「本机模型」这个选项能成立的前提，退了就等于让用户白配一场。
