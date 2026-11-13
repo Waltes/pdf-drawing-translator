@@ -2368,21 +2368,36 @@ class App(GlassWindow):
                                      "「原图已换算」那行小字。",
                                      n=nonote), "dim")))
                 miss = stats.get("untranslated") or []
+                # 转曲文字：图上看得见、文字层里没有，程序够不着。
+                # 它们也是「没译的」，必须算进未译条数 —— 否则标题写着「共 0 条」，
+                # 图上却明明还有几行英文，这正是客户投诉过的那种自相矛盾。
+                outlined = stats.get("outlined") or []
                 # 未译清单始终写一份：没有未译就写「全部译出」。
                 # 结构保持稳定，用户不用猜「这次是没漏，还是漏了没出清单」。
                 miss_file = plan["untranslated"]
                 try:
                     with open(miss_file, "w", encoding="utf-8") as f:
                         f.write(i18n.fmt("{name} 未译条目（共 {n} 条）",
-                                         name=name, n=len(miss)) + "\n\n")
+                                         name=name, n=len(miss) + len(outlined))
+                                + "\n\n")
                         if miss:
                             f.write(T("下面这些位置保留原文，没有译出。\n"
                                       "多为纯代号、人名、特殊符号或中英混排，"
                                       "硬翻反而毁图纸。\n\n"))
                             for pg, txt in miss:
                                 f.write(i18n.fmt("第 {p} 页  {t}", p=pg, t=txt) + "\n")
-                        else:
+                        elif not outlined:
                             f.write(T("全部译出，没有未译条目。") + "\n")
+                        # 曲线文字单独一节：为什么没译和「故意保留原文」是两回事，
+                        # 处理办法也不同（前者要找制图方重导，后者改不动也不必改）
+                        if outlined:
+                            f.write("\n\n" + T(
+                                "曲线文字：导出时被转成了矢量轮廓，图上看得见、"
+                                "文字层里却没有，程序读不到，所以这些位置仍是原文。\n"
+                                "要改只能让制图方重新导出带文字的 PDF；\n"
+                                "或者用本程序的图像模式整页重做一遍。\n\n"))
+                            for pg, txt in outlined:
+                                f.write(i18n.fmt("第 {p} 页  {t}", p=pg, t=txt) + "\n")
                         # 复核判出来的问题写进同一份清单。用户只需要看一个文件
                         # 就知道「哪里没翻、哪里要自己核」，拆成两份反而会漏看 ——
                         # 这份清单本来就是拿来对照原图逐处核的。
@@ -2392,6 +2407,18 @@ class App(GlassWindow):
                                 f.write(line + "\n")
                 except Exception:
                     pass
+                if outlined:
+                    self.msg_q.put(("log", (
+                        i18n.fmt("   另有 {n} 处文字是曲线（转曲），文字层读不到，"
+                                 "图上仍是原文：", n=len(outlined)), "warn")))
+                    for pg, txt in outlined[:8]:
+                        self.msg_q.put(("log", (
+                            i18n.fmt("     第{p}页：{t}", p=pg, t=txt[:60]), "dim")))
+                    if len(outlined) > 8:
+                        self.msg_q.put(("log", (
+                            i18n.fmt("     …另有 {n} 处，清单见文件夹内「{f}」",
+                                     n=len(outlined) - 8,
+                                     f=os.path.basename(miss_file)), "dim")))
                 if miss:
                     for pg, txt in miss[:12]:
                         self.msg_q.put(("log", (
@@ -3168,6 +3195,23 @@ def _selftest():
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # 转曲文字检测：绝不能把文字层里已经有的字报成「曲线文字」。
+    # 误报的代价是每次出图都多出一串假警报要人工核，
+    # 比不报更糟 —— 用户会直接无视整份清单。
+    try:
+        if image_text.ocr_available():
+            d = pymupdf.open()
+            p = d.new_page(width=320, height=220)
+            p.insert_text((40, 100), "Front view", fontsize=12)
+            got = image_text.scan_outlined_text(p)
+            check(T("转曲文字不误报文字层"), len(got) == 0,
+                  f"报出 {len(got)} 处：{[t for _b, t in got][:3]}")
+            d.close()
+        else:
+            check(T("转曲文字不误报文字层"), True, T("OCR 组件不可用，跳过"))
+    except Exception as exc:
+        check(T("转曲文字不误报文字层"), False, f"{type(exc).__name__}: {exc}")
 
     # 本机部署：不填密钥也要能用，而且不该冒出云端费用。
     # 这两条是「本机模型」这个选项能成立的前提，退了就等于让用户白配一场。

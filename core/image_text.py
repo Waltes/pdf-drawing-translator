@@ -285,6 +285,129 @@ def fix_ocr_spacing(text):
     return joined
 
 
+# ---------------------------------------------------------------------------
+# 转曲文字：图上看得见，文字层里却没有
+# ---------------------------------------------------------------------------
+# 起因（客户实际踩到）：SledBox 图纸的视图标题在导出时被转成了曲线，
+# 放大看是空心描边 —— 只有绿色笔画、没有填充。文字层里一个字都没有，
+# 常规流程完全读不到，于是程序照常交出一份「翻译版」，
+# 未译清单还写着「全部译出」，而图上明明还有 6 处英文。
+#
+# 为什么不能靠矢量形状猜：
+# 试过。图纸上大量小折线本身就是「只描边、不填充」的小路径，
+# 纯几何判断在一页上给出 26 处候选，其中只有 6 处真是字。
+# 所以改用 OCR 当基准：OCR 读得出来、文字层却没有的，才认定是转曲文字。
+#
+# 填不填实：实测两种都试。
+#   - 原样 OCR（空心不填）：6 处全检出，读出的字更准（Top view、Front view 都对）
+#   - 闭运算填实后 OCR：同样 6 处，但把字母 i 读成 l（Top vlew、Sldo vow）
+# 所以默认走原样，只有原样一处都没读出来时才退回填实那一路 ——
+# 那种情况说明这个文件的轮廓太细，需要加粗才认得出。
+OUTLINE_ZOOM = 3.0            # 整页渲染倍数。实测 3.0 与 4.0 检出数一样，3.0 快一倍
+OUTLINE_MIN_LETTERS = 3       # 至少含几个字母才算「一句话」，纯数字不报
+OUTLINE_MIN_LETTER_RATIO = 0.4  # 字母占非空白字符的比例下限，挡掉线条被读成的乱码
+OUTLINE_KNOWN_OVERLAP = 0.35  # 与文字层词框重叠超过这个比例，就是同一处重复识别
+
+
+def _outlined_from_image(rgb, zoom, known):
+    """把一张整页位图交给 OCR，挑出「文字层里没有」的那些。"""
+    tmp = os.path.join(DATA_DIR, "_ocr_outline_tmp.png")
+    try:
+        from PIL import Image
+        Image.fromarray(rgb.astype("uint8")).save(tmp)
+        result, _ = _get_ocr()(tmp)
+    except Exception:
+        return []
+    finally:
+        # 临时图用完就删。留在这儿既不占地方也不体面，
+        # 而且会被当成新文件出现在数据目录里。
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+    hits = []
+    for item in (result or []):
+        try:
+            pts, raw_text, score = item[0], item[1], float(item[2])
+        except Exception:
+            continue
+        if score < MIN_CONF:
+            continue
+        text = fix_ocr_spacing(clean_ocr_text(raw_text))
+        # 没有字母的（尺寸数字、编号、纯符号）不用翻译，报出来只会添乱。
+        # 光数字母个数不够：图纸上的细线会被读成 "001 'os 06" 这种，
+        # 掺着两三个字母，所以还要看字母占实际字符的比例。
+        letters = len(re.findall(r"[A-Za-z\u4e00-\u9fff]", text))
+        compact = len(re.sub(r"\s", "", text)) or 1
+        if (letters < OUTLINE_MIN_LETTERS
+                or letters < OUTLINE_MIN_LETTER_RATIO * compact):
+            continue
+
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        box = pymupdf.Rect(min(xs) / zoom, min(ys) / zoom,
+                           max(xs) / zoom, max(ys) / zoom)
+        if box.is_empty:
+            continue
+        # 和文字层已有的词重叠 = 同一处文字被重复识别，不是转曲字
+        if any((w & box).get_area() > OUTLINE_KNOWN_OVERLAP * box.get_area()
+               for w in known):
+            continue
+        # 同一处被切成两半时留更长的那个
+        dup = False
+        for i, (h_box, h_text) in enumerate(hits):
+            if (h_box & box).get_area() > 0.5 * min(h_box.get_area(), box.get_area()):
+                if len(text) > len(h_text):
+                    hits[i] = (box, text)
+                dup = True
+                break
+        if not dup:
+            hits.append((box, text))
+    return hits
+
+
+def scan_outlined_text(page):
+    """
+    找出这一页上「看得见、文字层里却没有」的文字（转曲文字）。
+
+    只读，不改文件。结果交给调用方去如实汇报 ——
+    「还有哪几处是原文」，比「全部译出」这句空话有用得多。
+
+    返回 [(rect, text)]，rect 是 PDF 坐标下的字块位置。
+    识别不出来或组件不可用时返回空列表：宁可少报，不能瞎报。
+    """
+    if not ocr_available():
+        return []
+    np = _numpy()
+    try:
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(OUTLINE_ZOOM, OUTLINE_ZOOM))
+    except Exception:
+        return []
+    if pix.width < 80 or pix.height < 80:
+        return []
+
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    rgb = arr[:, :, :3] if pix.n >= 3 else np.repeat(arr[:, :, :1], 3, axis=2)
+
+    known = [pymupdf.Rect(w[:4]) for w in page.get_text("words")]
+    hits = _outlined_from_image(rgb, OUTLINE_ZOOM, known)
+    if hits:
+        return hits
+
+    # 原样一处都没读出来：多半是轮廓太细，填实再来一次
+    try:
+        from PIL import Image, ImageFilter
+        gray = np.asarray(Image.fromarray(rgb.astype("uint8")).convert("L"))
+        dark = (gray < 200).astype(np.uint8)
+        flat = Image.fromarray(((1 - dark) * 255).astype(np.uint8))
+        # 灰度图里胀大黑字用 MinFilter，收缩回原粗细用 MaxFilter（写反会得到全白图）
+        filled = flat.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+        return _outlined_from_image(np.array(filled.convert("RGB")), OUTLINE_ZOOM, known)
+    except Exception:
+        return []
+
+
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
                         force_full=False, write_marks=None, fixes=None):

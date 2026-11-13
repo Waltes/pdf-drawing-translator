@@ -422,6 +422,30 @@ Text coverage: 150 to translate, 114 translated (5 from bitmaps), 36 untranslate
 - Reasons for missing items include busy backgrounds that were not repainted, sentences
   that failed the checks, and OCR failures on scans. See section 11.
 
+#### Outlined text: visible on the drawing, invisible to the text layer
+
+Some drawings are exported with "convert text to outlines". Part of the lettering is drawn
+as vector outlines — zoom in and the characters are hollow, stroked but not filled. They are
+plainly visible on the page, yet absent from the text layer, so the normal pipeline cannot
+reach them and they stay in the original language.
+
+The program checks each page and writes what it finds into the untranslated list, in a
+section of its own:
+
+```
+Outlined text: these characters were converted to vector outlines on export.
+They are visible on the drawing but absent from the text layer, so the program
+cannot reach them and they remain in the original language.
+
+page 1  Cut A - A
+page 1  Top view
+```
+
+The wording in that section was read back by OCR and may contain the odd misrecognised
+letter; check it against the drawing. To actually change those spots there are only two
+options: have the drafter re-export a PDF with live text, or run the file through the
+program's image mode, which redoes the whole page (limited: type gets compressed).
+
 #### When the box is too narrow: wrap first, keep the source as a last resort
 
 There is an unavoidable conflict in drawings: 「门板」is two Chinese characters, its English

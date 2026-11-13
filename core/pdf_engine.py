@@ -1482,7 +1482,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
                 stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC,
                 ocr_full_pages=False, verify=True, dst_lang=None,
-                reviewer=None):
+                reviewer=None, detect_outlined=True):
     """
     处理整份 PDF。
     translate_fn(text, lang) -> str      逐条翻译（兼容旧用法）
@@ -1529,13 +1529,22 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          所以调用方**应当显式传**。
     reviewer                             翻译器实例，语义抽查要用。同 dst_lang，
                                          显式传最稳，别指望从 translate_batch 上反推。
+    detect_outlined                      逐页查一遍「转曲文字」：导出时被转成
+                                         矢量轮廓的字，图上看得见、文字层里没有，
+                                         常规流程够不着。**只检测不改写**，
+                                         结果回填 stats_out["outlined"]
+                                         给未译清单如实交代；整页 OCR 模式下自动跳过
+                                         （那种模式本来就把轮廓字一起处理了）。
     """
     doc = pymupdf.open(src_path)
     total = len(doc)
     all_report = []
     stat = {"targets": 0, "translated": 0, "untranslated": [], "image_texts": 0,
             "paragraphs": 0, "unit_decl_fixed": 0, "unit_decl_nonote": 0,
-            "metric_marks": 0}
+            "metric_marks": 0,
+            # 转曲文字（导出时被转成矢量轮廓）：文字层里没有，常规流程够不着。
+            # 这里只记账、不改文件，用来如实告诉用户「还有哪几处是原文」。
+            "outlined": []}
     # 写入记录 [{page, rect, out, src}]，供输出前的复核回读校验。
     # 擦除是不可逆的，只有写完再读回来才能证明「这里没有被擦成空白」。
     marks = []
@@ -1858,6 +1867,24 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                              f"第 {page_no + 1}/{total} 页：替换图内标注 {n_img} 处")
             for item in img_misses:
                 stat["untranslated"].append((page_no + 1, item[1]))
+
+        # ---------- 转曲文字：图上看得见，文字层里却没有 ----------
+        # 只检测、不改写。没检出就什么都不说；检出了交给未译清单如实交代 ——
+        # 「全部译出」这句话只有在确实没有残留原文时才成立。
+        #
+        # 整页 OCR 模式不用查：那种模式本来就把整页当位图识别，
+        # 轮廓字会被当成普通图内文字一并处理掉。
+        if detect_outlined and not ocr_full_pages:
+            try:
+                found = image_text.scan_outlined_text(page)
+            except Exception:
+                found = []      # 检测失败就当没发现，绝不据此干扰正常产出
+            if found:
+                stat["outlined"].extend((page_no + 1, text) for _box, text in found)
+                if progress:
+                    progress(page_no + 1, total,
+                             f"第 {page_no + 1}/{total} 页：另有 {len(found)} 处"
+                             f"文字是曲线（转曲），文字层读不到")
 
     # ---------- 输出前复核（含打回重译） ----------
     # 位置在落盘之前：复核要回读页面、拿改完还没存的那份去查才有意义。

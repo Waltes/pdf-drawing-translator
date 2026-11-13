@@ -27,6 +27,20 @@ EN = {
         "translating them would damage the drawing.\n\n",
     "第 {p} 页  {t}": "page {p}  {t}",
     "全部译出，没有未译条目。": "Everything was translated.",
+    "曲线文字：导出时被转成了矢量轮廓，图上看得见、文字层里却没有，程序读不到，所以这些位置仍是原文。\n"
+    "要改只能让制图方重新导出带文字的 PDF；\n"
+    "或者用本程序的图像模式整页重做一遍。\n\n":
+        "Outlined text: these characters were converted to vector outlines on export. "
+        "They are visible on the drawing but absent from the text layer, so the program "
+        "cannot reach them and they remain in the original language.\n"
+        "To change them, ask the drafter to re-export a PDF with live text,\n"
+        "or run this file through image mode, which redoes the whole page.\n\n",
+    "   另有 {n} 处文字是曲线（转曲），文字层读不到，图上仍是原文：":
+        "   {n} more item(s) are outlined text — not in the text layer, "
+        "still in the original language on the drawing:",
+    "     第{p}页：{t}": "     page {p}: {t}",
+    "转曲文字不误报文字层": "outlined-text scan ignores live text",
+    "OCR 组件不可用，跳过": "OCR unavailable, skipped",
     "{name} 计量数据校验清单": "{name} — measurement check report",
     "怎么读这份清单：\n  已纠正 —— 程序按原文重新算过并改正的，不用处理，核对一眼即可；\n  待确认 —— 程序判不准（多半是同句里数量对不上），请对照原图核实。\n\n":
         "How to read this report:\n"
