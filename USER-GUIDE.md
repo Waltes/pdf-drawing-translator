@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.9
+Version 1.1.10
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.9.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.10.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -1036,9 +1036,23 @@ Two hard rules:
   and guessing at them damages digits. Misreading one symbol means machining the wrong hole, so
   the tool would rather not fill it in.
 - **When in doubt, stay out.** The digit `8`, `%`, and the characters 「日」「回」「四」 are never
-  taken for a diameter. An uppercase `Ø` is restored as `Ø` and a lowercase `ø` as `ø`; the
-  case is never silently changed.
+  taken for a diameter. A symbol already present in the source is left alone; when one has to be
+  supplied, it is always the lowercase `ø` — see below for why the case is no longer inferred.
 
+There is one class that shape analysis can never separate: the **slashed zero** used by many
+engineering fonts to tell the digit 0 from the letter O. It is a full-height oval with a
+lower-left to upper-right stroke — the same form and the same height as an uppercase `Ø`, with
+the same hole count, angle and area ratio. No threshold fixes this; the shape simply does not
+carry enough information.
+
+The only remaining signal is context. A diameter marker always precedes the number (`ø12`,
+`Ø50`), so if a `0` already occupies that position, it is a digit and no symbol is inserted.
+That is why `012mm` is left untouched instead of becoming `ø012mm`. The same overlap is why the
+case is not guessed: the stroke of a lowercase `ø` extends past the ring, so its ink box
+measures nearly as tall as the uppercase form. Substitutions are therefore always lowercase `ø`.
+
+A missing symbol is obvious to anyone glancing at the drawing; a wrong symbol gets the wrong
+hole machined. The trade-off always leans towards omission.
 
 Digits that carry meaning are never touched: tolerances (`±0.50`), radii (`R0.50`), threads
 (`M8×1.25`), thousands separators (`1,000`), and values produced by unit conversion (`4"`
@@ -1114,7 +1128,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.9.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.10.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

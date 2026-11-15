@@ -51,6 +51,17 @@
 
 保守起见只认这一种符号。°±×□ 的形态特征弱得多，硬认会把数字读坏 ——
 认错一个符号等于把客户的孔加工错，宁可不留。
+
+形状分不开的怎么办
+------------------
+有一类靠形状永远分不开：工程字体的「带斜线的零」。它就是个全高椭圆加一条
+左下到右上的斜线，跟大写 Ø 同形同高，洞数、分隔角、洞面积占比全落在同一区间。
+调阈值没有用 —— 信息量不够，不是参数没调好。
+
+形状之外还有一条线索：符号该待的位置上已经站着什么。直径符号永远写在数字
+前面（ø12、Ø50），那个位置上要是已经有 0，它就是数字，不是符号。
+所以补之前先看位置，位置被 0/O/o/θ 占着就放弃。漏一个符号人一眼能看出来，
+补错一个符号要按错的孔径加工 —— 两边代价差得远，一律往漏的方向偏。
 """
 
 # 只有真要用的人才 import cv2：没装 OCR 组件时整条图像模式本来就不走，
@@ -96,7 +107,31 @@ ZOOM_FINE = 8                 # 精判用的渲染倍率，实测 6~12 倍结果
 
 # 文本里哪些字符算是「已经被读出来的直径写法」。
 # 认得出来的话就地换掉，别再插一个重复的。
-SYMBOL_VARIANTS = "øØ⌀φΦ∅@"
+# 拆成两组，因为处理方式不同：
+#   真符号 —— OCR 读对了，原样尊重，一个字节都不改（尤其不许把小写改大写）；
+#   误读   —— OCR 把它读成了别的字符，形状判出来就要换掉。
+TRUE_SYMBOLS = "øØ⌀φΦ∅"
+# `·` 也算误读：PDF 字体缺 ToUnicode 表时，字符会被抽成中点，这是实测遇到过的。
+# 敢把它列进来，是因为只在形状判出直径符号时才替换 —— 那时右边已经是数字，
+# 语境就是直径标注，不会是普通的分隔点。
+MISREAD_SYMBOLS = "@·"
+SYMBOL_VARIANTS = TRUE_SYMBOLS + MISREAD_SYMBOLS
+
+# 这些字符占着符号该在的位置时，一律不补。
+#
+# 为什么必须有这一道
+# ------------------
+# 「带斜线的零」是工程字体专门用来区分数字 0 和字母 O 的写法：一个全高椭圆
+# 加一条左下到右上的斜线。它的形状跟大写 Ø 一模一样 —— 洞数 2、分隔角约 60°、
+# 洞面积占比也在这个区间内，靠形状根本分不开，调阈值也分不开。
+#
+# 更要紧的是 h_ref 取的是行内最高的字形，这一行里有斜线零的时候，
+# 高度比恒等于 1.0，那道闸门等于没有。所以这不是「精度不够」，是判据缺一环。
+#
+# 补不补，只能看上下文：符号该在的位置上要是已经站着一个 0，那就不是符号，
+# 是数字。宁可不补 —— 漏一个符号人扫一眼就看得出来，补错一个符号
+# 客户会按错的孔径加工。
+DIGIT_LOOKALIKE = "0OoθΘ"
 
 
 def _char_em(ch):
@@ -202,10 +237,17 @@ def _judge(cv, np, page, rect, h_ref_pt):
     share = (a1 + a2) / float(max(1.0, pix.width * pix.height))
     if not (HOLE_AREA_RANGE[0] <= share <= HOLE_AREA_RANGE[1]):
         return False, f"洞占比 {share:.2f}", None
-    # 高度比接近数字高度的是大写的 Ø，只占 x-height 的是小写的 ø。
-    # 原图写哪个就还哪个 —— 制图惯例是大写，但客户原图用小写时
-    # 突然变成大写也算改了原图。
-    char = "Ø" if ratio >= 0.88 else "ø"
+    # 大小写不猜。
+    #
+    # 原先按高度比 0.88 划线：小写 ø 只占 x-height，大写 Ø 顶满数字高度。
+    # 实测不成立 —— 斜线要伸出圆环两端，墨迹框跟着变高，一个 x-height 的
+    # 小写 ø 量出来是数字高度的 0.93，直接越线判成大写。这不是调阈值能修的：
+    # 大写和小写的高度区间本来就重叠，斜线的外伸量又随字体变。
+    #
+    # 猜错的代价是「原图小写，输出变大写」，等于擅自改了原图。所以不猜：
+    # 一律给小写 ø。图纸上小写是主流写法，而且原文里本来就是真符号的时候
+    # 走的是「保留原文」分支，压根不会走到这儿。
+    char = "ø"
     return True, f"洞数2 方向{ang:.0f}° 高度比{ratio:.2f}", char
 
 
@@ -219,7 +261,7 @@ def _insert_pos(text, frac):
     """
     按横向相对位置 frac（0~1）算出该插在第几个字符之前。
 
-    只认数字和字母：落在汉字上说明对齐估偏了，返回 None 让调用方放弃。
+    只认数字、字母和误读字符：落在汉字上说明对齐估偏了，返回 None 让调用方放弃。
     """
     ems = [_char_em(c) for c in text]
     total = sum(ems) or 1.0
@@ -228,9 +270,42 @@ def _insert_pos(text, frac):
         center = (acc + em / 2.0) / total
         acc += em
         if abs(center - frac) <= 0.5 * em / total + 0.06:
-            if text[i].isdigit() or text[i].isalpha():
+            ch = text[i]
+            # 数字和字母是正常落点。误读字符（@）也必须算落点 ——
+            # 它本身就是来被替换掉的那个字符，把它拒了等于「判出了符号
+            # 却补不进去」，@12mm 会原样留着。汉字不认。
+            if ch.isdigit() or ch.isalpha() or ch in MISREAD_SYMBOLS:
                 return i
     return None
+
+
+def _apply(out, pos, ch):
+    """
+    把符号落实到文本里。返回 (新文本, 是否算补上一个)。
+
+    顺序是「先认已有的 → 再挡形近字 → 最后才插」，不能反。
+    反了就会出现两种脏结果：把原本好好的 ø 再插一个成「øø12」，
+    或者把数字 0 插成「ø012」。
+    """
+    # ① 左边已经是真符号：OCR 读对了，原样留着。
+    #    不用形状猜的结果覆盖它 —— OCR 认出来的写法比形状估计可信，
+    #    而且原图小写就不许输出成大写。
+    if pos > 0 and out[pos - 1] in TRUE_SYMBOLS:
+        return out, False
+    # ② 左边是误读字符（@）：换掉。
+    if pos > 0 and out[pos - 1] in MISREAD_SYMBOLS:
+        return out[:pos - 1] + ch + out[pos:], True
+    # ③ 右边同理：真符号留着，误读的换掉。
+    if pos < len(out) and out[pos] in TRUE_SYMBOLS:
+        return out, False
+    if pos < len(out) and out[pos] in MISREAD_SYMBOLS:
+        return out[:pos] + ch + out[pos + 1:], True
+    # ④ 该位置上站着的是 0/O/o/θ —— 跟直径符号同形，形状判不开，
+    #    按数字处理，不补。这一道挡的就是「带斜线的零」。
+    if pos < len(out) and out[pos] in DIGIT_LOOKALIKE:
+        return out, False
+    # ⑤ 位置是干净的，插进去。
+    return out[:pos] + ch + out[pos:], True
 
 
 def complete_symbols(page, clip, rect, zoom, text, rgb=None):
@@ -268,8 +343,17 @@ def complete_symbols(page, clip, rect, zoom, text, rgb=None):
                                  cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
         if int((ink > 0).sum()) == 0:
             return text, []
-        # 低倍下描边笔画只有两三像素，得闭得狠一点才连得起来
-        k = max(3, h_px // 14)
+        # 闭运算核按「字」的尺度算，不能按 rect 算。
+        #
+        # rect 是 OCR 给的文字框，常带上下行距余量 —— 实测 12.5pt 的字装在
+        # 28pt 高的框里，按框高算出来的核有 6 像素，比字之间的空隙还宽，
+        # 「Ø50」三个字符被糊成一整块（宽高比 2.32，判废，符号从此补不回来）。
+        # 按墨迹行高算就对：同一个 16pt 的 Ø，核 4 时三个字符还是分开的，
+        # 核到 5 才开始粘。
+        _ink_rows = np.nonzero((ink > 0).sum(axis=1))[0]
+        glyph_px = (int(_ink_rows.max() - _ink_rows.min()) + 1
+                    if len(_ink_rows) else h_px)
+        k = max(3, int(glyph_px * 0.10))
         ink = cv.morphologyEx(ink, cv.MORPH_CLOSE,
                               cv.getStructuringElement(cv.MORPH_ELLIPSE, (k, k)))
 
@@ -291,6 +375,16 @@ def complete_symbols(page, clip, rect, zoom, text, rgb=None):
             return text, []
 
         blobs.sort(key=lambda b: b[0])
+        # 字高基准取行内最高的字形，不取中位数。
+        #
+        # 中位数听着更稳，实测更糟：一行「ø12mm」里 m 只有数字六成高，
+        # 中位数会落到数字和 m 之间，符号自己的高度比反而被顶到 1.08 上限外，
+        # 真符号当场漏认。取最高值时结果只会偏保守（比例偏小），
+        # 不会把真符号筛掉 —— 而这一层的取舍就是宁可漏。
+        #
+        # 代价要说清楚：一行里有斜线零时，它自己就是最高的那个，
+        # 高度比恒等于 1.0，这道闸门对它无效。斜线零靠 DIGIT_LOOKALIKE 挡，
+        # 不靠这里。
         h_ref_px = max(b[3] for b in blobs)
         h_ref_pt = h_ref_px / float(zoom)
         left = min(b[0] for b in blobs)
@@ -315,21 +409,18 @@ def complete_symbols(page, clip, rect, zoom, text, rgb=None):
 
         out = text
         added = []
+        used = set()
         # 从右往左插，前面插过的字符不会影响后面算出来的下标
         for frac, _bx, ch in sorted(hits, key=lambda h: -h[0]):
             pos = _insert_pos(out, frac)
-            if pos is None:
+            if pos is None or pos in used:
+                # 两个候选落到同一个字符上（斜线被当成独立笔画时会出现），
+                # 只认第一个，否则会插成「øø12」。
                 continue
-            # 这个位置上已经是某种直径写法了，就地换掉，别插成「ø@12mm」。
-            # OCR 有时读成 @ 有的读成 0，都在前一个字符里 —— 先看左边，
-            # 左边干净再看右边。
-            if pos > 0 and out[pos - 1] in SYMBOL_VARIANTS:
-                out = out[:pos - 1] + ch + out[pos:]
-            elif pos < len(out) and out[pos] in SYMBOL_VARIANTS:
-                out = out[:pos] + ch + out[pos + 1:]
-            else:
-                out = out[:pos] + ch + out[pos:]
-            added.append(ch)
+            used.add(pos)
+            out, ok = _apply(out, pos, ch)
+            if ok:
+                added.append(ch)
         if not added:
             return text, []
         return out, added

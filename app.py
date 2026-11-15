@@ -3612,20 +3612,28 @@ def _selftest():
         if not _it3.ocr_available():
             check(T("OCR 丢掉的直径符号能从字形找回来"), True, "OCR 组件未安装，跳过")
             check(T("数字与百分号不被当成直径符号"), True, "OCR 组件未安装，跳过")
+            check(T("原文已有的直径符号一个字都不改"), True, "OCR 组件未安装，跳过")
         else:
             _np3 = _it3._numpy()
             doc2 = pymupdf.open()
-            page2 = doc2.new_page(width=320, height=260)
-            _rows = [("ø12mm", "12mm", True), ("Ø50", "50", True),
-                     ("25mm", "25mm", False), ("8mm", "8mm", False),
-                     ("100%", "100%", False), ("日", "日", False)]
+            page2 = doc2.new_page(width=320, height=340)
+            # 四种期望：补=该补上、不动=不许动、原样=原文已有真符号一个字不改
+            _rows = [("ø12mm", "12mm", "补"), ("Ø50", "50", "补"),
+                     ("25mm", "25mm", "不动"), ("8mm", "8mm", "不动"),
+                     ("100%", "100%", "不动"), ("日", "日", "不动"),
+                     # 带斜线的零：形状跟大写 Ø 分不开，只能靠「该位置已有
+                     # 数字」这一道挡。挡住了就是不动，漏过去会变成 ø012mm。
+                     ("ø12mm", "012mm", "不动"),
+                     # 原文本来就是真符号：OCR 读对了，形状层一个字都不许改，
+                     # 尤其不许把小写改判成大写。
+                     ("ø12mm", "ø12mm", "原样")]
             _boxes, _yy = [], 30
-            for _src, _ocr, _want in _rows:
+            for _src, _ocr, _mode in _rows:
                 _fn = "china-s" if _src == "日" else "helv"
                 page2.insert_text((20, _yy), _src, fontsize=16,
                                   color=(0.5, 0.5, 0.5), fontname=_fn)
                 _boxes.append((pymupdf.Rect(16, _yy - 18, 110, _yy + 6),
-                               _ocr, _want, _src))
+                               _ocr, _mode, _src))
                 _yy += 34
             _pix3 = page2.get_pixmap(matrix=pymupdf.Matrix(3, 3))
             _arr = _np3.frombuffer(_pix3.samples, dtype=_np3.uint8).reshape(
@@ -3633,26 +3641,35 @@ def _selftest():
             _rgb = (_arr[:, :, :3] if _pix3.n >= 3
                     else _np3.repeat(_arr[:, :, :1], 3, axis=2)).astype(int)
 
-            _hit, _miss, _false = [], [], []
-            for _rect, _ocr, _want, _src in _boxes:
+            _hit, _miss, _false, _rewrite = [], [], [], []
+            for _rect, _ocr, _mode, _src in _boxes:
                 _new, _added = _gl.complete_symbols(
                     page2, page2.rect, _rect, 3, _ocr, rgb=_rgb)
                 _got = ("ø" in _new) or ("Ø" in _new)
-                if _want and _got:
-                    _hit.append(_src)
-                elif _want:
-                    _miss.append(f"{_src}→{_new}")
-                elif _got:
-                    _false.append(f"{_src}→{_new}")
+                if _mode == "补":
+                    if _got and len(_new) > len(_ocr):
+                        _hit.append(_src)
+                    else:
+                        _miss.append("%s→%s" % (_src, _new))
+                elif _mode == "不动":
+                    if _new != _ocr:
+                        _false.append("%s→%s" % (_src, _new))
+                else:
+                    if _new != _ocr:
+                        _rewrite.append("%s:%s→%s" % (_src, _ocr, _new))
             check(T("OCR 丢掉的直径符号能从字形找回来"),
                   not _miss, "认出=%s 漏掉=%s" % (_hit, _miss or "无"))
             check(T("数字与百分号不被当成直径符号"),
                   not _false, "误认=%s" % (_false or "无"))
+            check(T("原文已有的直径符号一个字都不改"),
+                  not _rewrite, "改写=%s" % (_rewrite or "无"))
             doc2.close()
     except Exception as exc:
         check(T("OCR 丢掉的直径符号能从字形找回来"), False,
               f"{type(exc).__name__}: {exc}")
         check(T("数字与百分号不被当成直径符号"), False,
+              f"{type(exc).__name__}: {exc}")
+        check(T("原文已有的直径符号一个字都不改"), False,
               f"{type(exc).__name__}: {exc}")
 
     # 纯尺寸标注必须原样留着，不许被"重画"一遍。
