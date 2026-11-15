@@ -527,6 +527,15 @@ wrap_fit = textfit.wrap_fit
 # 再大就会盖到相邻文字或尺寸线上，宁可这处保留原文。
 FIT_MAX_RATIO = 1.4
 
+# 字号缩放的两条线，与位图层共用（规则放在 typography，两边各写一份迟早走偏：
+# 同一份图纸里两处一样宽的框会出现两种缩放结果）
+#   SHRINK_FLOOR 优先线 —— 缩到这里就先想办法救（折行），别再往下压
+#   SHRINK_HARD  保底线 —— 低于它就不写，保留原文并如实汇报
+SHRINK_FLOOR = typography.SHRINK_FLOOR
+SHRINK_HARD = typography.SHRINK_HARD
+# 可读下限：写进图纸的字不小于这个值，低于它宁可保留原文
+MIN_READABLE = typography.MIN_READABLE
+
 
 def text_obstacles(page, extra=()):
     """
@@ -590,6 +599,9 @@ def plan_group(g, text, obstacles=()):
     # 写入前的排版规范化：压掉多余空格、补上标点后的空格、
     # 中文换全角标点。这一步只改写法不改字义。
     text = typography.normalize(text)
+    # 再把模型凭空写长的尺寸收回原件的长度：3.00mm→3mm、50.00×50.00×2.50
+    # →50×50×2.5。省下的是实打实的版面宽度，也是把精度表达还原回原文。
+    text = typography.tighten_numbers(text)
     # 中英之间留半个字的空隙是中文排版的通行做法，但它会占宽。
     # 所以只在「加了还放得下」时才加 —— 窄框里先保证塞得进去，
     # 空隙是锦上添花，不能为了好看把一整条挤成写不下。
@@ -607,31 +619,39 @@ def plan_group(g, text, obstacles=()):
     if box <= 0:
         return out
 
-    size = fit_font_size(font, text, g.size, box)
+    size = fit_font_size(font, text, g.size, box, min_scale=SHRINK_HARD)
     need = font.text_length(text, fontsize=size)
-    if need <= box * FIT_MAX_RATIO:
-        out["size"] = size
-        return out
+    single_ok = need <= box * FIT_MAX_RATIO
+    # 这条标注允许缩到的最小字号（原字号与可读下限取小，见 typography.readable_floor）
+    floor_size = typography.readable_floor(g.size)
 
-    # 单行怎么都超标 → 试折两行。
-    # 只有正放的横排才折：折出来的第二行要靠基线偏移往上叠，
-    # 标转了一定角度后这个偏移方向就不对了，折歪是一片斜着重叠的字，
-    # 比缩字号危险。旋转标注一律老老实实缩字号。
-    if abs(g.angle) < 0.5:
+    # 折行是「候选方案」，不是必经步骤：只有它写得出**比单行更大**的字号时才用。
+    # 早先无条件优先折行，出现过「折成一行、字号还更小」的荒唐结果 ——
+    # wrap_fit 在窄框里会把两行压回一行并降字号，那还不如老实单行缩一点。
+    #
+    # 什么时候值得试：字号已经掉到优先线以下（说明被压得厉害），
+    # 或者干脆超框 1.4 倍写不进去。
+    if abs(g.angle) < 0.5 and (size < g.size * SHRINK_FLOOR or not single_ok):
         # 可用高度 = 自己这行的高度 + 上方净空（封顶 2 倍字高：
         # 再往上的空间多半已经越过了表格线，占用会压到别的格子）
         room = min(g.rect.height + _room_above(g.rect, obstacles, 3.0 * g.size),
                    g.rect.height * 2.0 + 2.0)
-        # 折行的可用宽**就是框宽，一点不给余量**。
-        # v1.0.9 这里给的是 box*1.1，想着「折一下总能多挤 10%」，
-        # 实际结果是折出来的两行都超框：擦除只擦到框边，打回重写时
-        # 上一版超出那一截擦不掉，页面残留半截旧词（实测残留过一个 H）；
-        # 复核按框回读也读不到超出的部分。折行的意义本来就是「塞进框里」，
-        # 塞不进就该判写不下、保留原文，而不是硬挤出框外。
+        # 折行的可用宽**就是框宽，一点不给余量**。v1.0.9 这里给的是 box*1.1，
+        # 想着「折一下总能多挤 10%」，实际结果是折出来的两行都超框：
+        # 擦除只擦到框边，上一版超出那一截擦不掉，页面残留半截旧词。
         plan = wrap_fit(font, text, g.size, box, room)
-        if plan:
+        if (plan and len(plan[1]) >= 2 and plan[0] > size
+                and plan[0] >= floor_size - 1e-6):
             out["size"], out["lines"] = plan
             return out
+
+    if single_ok and size >= floor_size - 1e-6:
+        # 缩到优先线以下、折行又救不回来的，仍然写进去 —— 字偏小但读得出，
+        # 比留着原文让人再手工补一遍强。这类要记下来，让用户知道哪几处偏小。
+        if size < g.size * SHRINK_FLOOR:
+            out["small"] = True
+        out["size"] = size
+        return out
 
     out["fits"] = False
     out["why"] = "框太窄，译文放不下"

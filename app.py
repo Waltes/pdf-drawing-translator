@@ -3456,6 +3456,48 @@ def _selftest():
     except Exception as exc:
         check(T("冒号粘连的整条能译"), False, f"{type(exc).__name__}: {exc}")
 
+    # 7) 模型爱给数值补尾零（3mm→3.00mm、1000mm→1000.00mm），
+    #    一处白长两三个字符，长句就被挤着缩字号。出口要把它们收回去。
+    try:
+        tight = {
+            "3.00mm thick corner guard": "3mm thick corner guard",
+            "POST 80*80*3.00mm": "POST 80×80×3mm",
+            "1000.00mm long crossbar": "1000mm long crossbar",
+            "25mm x 25mm x 1.5mm": "25×25×1.5mm",
+        }
+        bad = {k: typography.tighten_numbers(k) for k, v in tight.items()
+               if typography.tighten_numbers(k) != v}
+        check(T("模型补的尾零会收回"), not bad, str(bad) if bad else "4 例")
+    except Exception as exc:
+        check(T("模型补的尾零会收回"), False, f"{type(exc).__name__}: {exc}")
+
+    # 8) 收紧数字不能碰带含义的位数：公差、螺纹、型号、千分位。
+    try:
+        keep = ["M8x30 bolts", "M8×1.25 thread", "tolerance ±0.50mm",
+                "radius R0.50", "1,000 pcs", "DN50 SCH40", "SCH40"]
+        changed = [s for s in keep if typography.tighten_numbers(s) != s]
+        check(T("型号与公差原样不动"), not changed, str(changed) if changed else "7 例")
+    except Exception as exc:
+        check(T("型号与公差原样不动"), False, f"{type(exc).__name__}: {exc}")
+
+    # 9) 字不能小到印出来是一道灰线。中文译成英文后长度是原来的一倍多，
+    #    按原框硬缩会把 7pt 的标注写到 3.5pt（实测过）。
+    #    这里造一条塞不下的长标注，要求它要么折行、要么保持可读、要么老实放弃。
+    try:
+        import pymupdf
+        long_en = "Hot-dip galvanized square tube 25×25×1.5mm thick"
+        g = pdf_engine.TextGroup()
+        g.rect = pymupdf.Rect(100, 100, 152, 109)
+        g.size, g.angle, g.dir = 7.0, 0.0, (1, 0)
+        g.block, g.spans, g.text = 0, [], long_en
+        p = pdf_engine.plan_group(g, long_en, obstacles=())
+        ok_size = (not p["fits"]) or p["size"] >= typography.MIN_READABLE - 0.01
+        check(T("译文字号不低于可读下限"), ok_size,
+              "fits=%s size=%.2f 最低%.1f" % (p["fits"], p["size"],
+                                            typography.MIN_READABLE))
+    except Exception as exc:
+        check(T("译文字号不低于可读下限"), False, f"{type(exc).__name__}: {exc}")
+
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")
     report = head + "\n\n" + "\n".join(lines) + "\n\n" + \

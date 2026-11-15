@@ -80,7 +80,10 @@ MIN_CONTRAST = 34     # 文字与背景的最小亮度差，太接近说明识�
 # 写回字号的下限。低于这个值的字印在图纸上等于没写：
 # 原文被背景色盖掉，新文字小到看不清，用户看到的就是一块空白。
 # 宁可这一条不写（保留原文、记进未译清单），也不能交出一块白斑。
-MIN_WRITE_SIZE = 3.5
+# 3.5 这个值本身太低 —— 实测有标注被写到 3.53pt，A3 上不到 1.3mm，
+# 是一道灰线。真正判定「小到不能要」的界线放在 typography.MIN_READABLE，
+# 这里跟着它走，文字层与位图层用同一个数，不各写一份。
+MIN_WRITE_SIZE = typography.MIN_READABLE
 
 _ocr_engine = None
 _font_cjk = None
@@ -753,7 +756,7 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
     # 写完立刻回读：盖掉原文却没写上去，是最难被发现的坏结果
     # （图上留一块白斑，谁也不会去查）。回读不到就当没写成，退回未译。
     failed = []
-    for c, out, _fill, _size, _font, _lines in plans:
+    for c, out, _fill, _size, _font, _lines, *_rest in plans:
         got = page.get_text("text", clip=c["rect"]).replace(" ", "")
         if got and out.replace(" ", "")[:1] in got:
             if write_marks is not None:
@@ -956,6 +959,10 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 规范化标点与空格：中文全角、英文冒号后带空格、多余空格压掉。
     # 位图层和文字层走同一套规则，一张图上不会出现两种逗号。
     out = typography.normalize(out.strip())
+    # 收紧数字写法：模型爱给数值补尾零（3mm→3.00mm、25*25*1.5→25*25*1.50），
+    # 一处白长两三个字符，长句就被挤得缩字号。这里先收回原件的长度，
+    # 后面算字号拿到的才是真实宽度。
+    out = typography.tighten_numbers(out)
     if font_cjk is None:
         font_cjk = _get_cjk_font()
     if font_latin is None:
@@ -1028,8 +1035,17 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # DOOR PANEL 九个字符，14pt 宽的框里单行无论怎么缩都是 2.5pt —— 等于没写；
     # 折成两行能把字号抬到 5pt，读得出，还在原来那块被盖住的区域里。
     lines = None
-    thresh = max(MIN_WRITE_SIZE, glyph_h * 0.25)
-    if size < thresh and not vertical:
+    # 下限分两级，顺序不能反：
+    #   优先线 八成 —— 到这里就先折行把字号抬回来（折行不丢内容）；
+    #   保底线 六成 —— 折行也救不回来才允许缩到这里，再低就不写。
+    # 为什么不做成一刀切八成：拿这份中文图纸实测过，硬卡 0.8 会让
+    # 13 条标注里 12 条写不进去、全部退回中文 —— 那比字小更难接受。
+    # 也不能像早先那样直接卡到 25%：原字高 7pt 的标注被压到 3.53pt，
+    # 打印出来是一道灰线，客户一眼就看出来「这块塞得特别小」。
+    # 半成偏小（八成到六成之间）照写但记下来，报告里能查到是哪几处。
+    hard = typography.readable_floor(glyph_h)
+    soft = max(hard, glyph_h * typography.SHRINK_FLOOR)
+    if size < soft and not vertical:
         # 第二行只能往上借空间，借多少有硬上限：可用高度就是原框高度
         # （多给 15% 余量）。OCR 框本来就贴着字，往上多写一行就会
         # 越过被盖住的区域，压到上面那行原文上 —— 那比不译更难看。
@@ -1037,13 +1053,16 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
         # 折行的意义就是把字号抬回来，拿缩小的值当上限等于白折
         plan = textfit.wrap_fit(font, out, glyph_h, r.width,
                                 glyph_h * 1.15)
-        if plan:
+        if plan and len(plan[1]) >= 2 and plan[0] > size:
             size, lines = plan
-    if size < thresh:
+    if size < hard:
         if untranslated is not None:
             untranslated.append(("图片内文字", c["text"]))
         return None
-    return (c, out, fill, size, font, lines)
+    # 第七项 small：字号落在优先线与保底线之间，写是写了但偏小。
+    # 上层据此在报告里点出位置 —— 用户看图纸觉得「这块有点小」时，
+    # 能查到是哪些地方、为什么小（原框太窄，英文又长）。
+    return (c, out, fill, size, font, lines, size < soft)
 
 
 def paint_plans(page, plans, report=None):
@@ -1058,13 +1077,13 @@ def paint_plans(page, plans, report=None):
         return 0
 
     # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
-    for c, _out, fill, _size, _font, _lines in plans:
+    for c, _out, fill, *_rest in plans:
         page.draw_rect(fill, color=None,
                        fill=tuple(float(v) / 255 for v in c["bg"]), width=0)
 
     # 第二轮：写译文
     changed = 0
-    for c, out, _fill, size, font, lines in plans:
+    for c, out, _fill, size, font, lines, *_rest in plans:
         tw = pymupdf.TextWriter(page.rect)
         color = tuple(float(v) / 255 for v in c["fg"])
         if c.get("vertical"):

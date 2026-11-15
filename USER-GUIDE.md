@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.3
+Version 1.1.4
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.3.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.4.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -855,9 +855,39 @@ than repainted, and listed as untranslated.
 Rotated labels (text turned 90° beside dimension lines) are written back in their original
 direction rather than flattened to horizontal. Laid out horizontally inside a box ten points
 wide, the text collapses to an unreadable smear that reads as a blank patch. When the
-translation is longer than the original, the font shrinks; if it would drop below a quarter
-of the original height, that one is skipped, the original is left in place, and it is listed
-as untranslated — a missing translation is easier to explain than a white smudge.
+translation is longer than the original, the font shrinks — but never below 60% of the
+original height, and never below 5.5 pt, the readable minimum. If both limits would be
+broken, that one is skipped, the original is left in place, and it is listed as untranslated.
+
+### 9.6 What happens when the translation is longer
+
+The same meaning runs 1.6–2.8× longer in English than in Chinese: a Chinese character is one
+em wide, a Latin letter roughly half. The box was sized for the Chinese text, so the English
+has to shrink. Previously there was one move — shrink until it fits — with no floor at all,
+which put a 7 pt label down to 3.5 pt: under 1.3 mm tall on A3, a grey line on paper.
+
+Four steps now, escalating only as needed:
+
+| Step | Action | Detail |
+|---|---|---|
+| 1 | Tighten number formatting | The model likes to write `3mm` as `3.00mm` and `25×25×1.5` as `25×25×1.50`, adding two or three characters each time. The program trims these back to the length of the original |
+| 2 | Wrap to two lines | Same font size, one extra line. Only when there is clear space above, and never more than two lines |
+| 3 | Shrink the font | Down to 60% of the original height at most, never below 5.5 pt (about 1.9 mm on A3) |
+| 4 | Keep the original | Only when all three fail; listed with its location |
+
+Step 1 also fixes something that is not merely cosmetic: `50.00` means a ±0.01 tolerance in
+machining, while the original says `50`. The trailing zeros the model adds are a precision
+requirement invented out of nothing. Trimming them saves width and restores the original
+precision.
+
+Why the limit is an absolute 5.5 pt rather than a ratio: a 16 pt heading shrunk to 8.8 pt is
+55% but still larger than body labels and perfectly legible; a 7 pt label shrunk to 3.5 pt is
+also 55% and is a grey line. Similar ratios, entirely different readability, so the check has
+to be on absolute size.
+
+Digits that carry meaning are never touched: tolerances (`±0.50`), radii (`R0.50`), threads
+(`M8×1.25`), thousands separators (`1,000`), and values produced by unit conversion (`4"`
+converted to `101.60mm`, where the zero means precision to 0.01).
 
 ---
 
@@ -929,7 +959,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.3.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.4.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

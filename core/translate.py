@@ -1532,7 +1532,15 @@ class Translator:
                 "standard codes and drawing numbers excepted). When translating into Chinese, render "
                 "O.D. as 外径, I.D. as 内径, THK as 厚度.\n"
                 "8. Keep one consistent rendering per term across the whole drawing.\n"
-                "9. Output JSON only, no prose.\n"
+                "9. When the target is a Latin-script language, keep it SHORT — a drawing label is "
+                "not a manual. Never pad numbers with trailing zeros: write 2.5, not 2.50; write 3, "
+                "not 3.00. In a dimension chain use × and put the unit only once at the end "
+                "(25×25×1.5mm, not 25mm×25mm×1.5mm). Abbreviate plain nouns the way drawings do: "
+                "galvanized→galv., thickness→THK, diameter→DIA, stainless steel→S.S., square tube→"
+                "sq. tube, quantity→QTY, maximum→MAX, approximately→approx. Only common nouns may "
+                "be abbreviated — part numbers, material grades and standard codes are copied "
+                "verbatim, never shortened.\n"
+                "10. Output JSON only, no prose.\n"
                 "Format: [{\"id\":0,\"text\":\"translation\"}]")
         return (
             "你是资深工程图纸翻译，长期为机械、五金、建材、护栏围栏类图纸做多语种互译。"
@@ -1555,7 +1563,13 @@ class Translator:
             "7. 译文里不许残留源语言的词汇（型号、单位、标准号、图号除外）。"
             "译成中文时要把 O.D. 译成外径、I.D. 译成内径、THK 译成厚度。\n"
             "8. 同一份图纸内同一术语必须译法统一。\n"
-            "9. 只输出 JSON，不要任何解释文字。\n"
+            "9. 译文是英文等西文时要短 —— 图纸标注不是说明书，能省的字都省。"
+            "数值一律不补尾零：原文 2.5 就写 2.5，不要写 2.50；原文 3 就写 3，不要写 3.00。"
+            "尺寸链用 × 连接、整条只留末尾一个单位（25×25×1.5mm，不要写 25mm×25mm×1.5mm）。"
+            "普通名词按制图习惯缩写：galvanized→galv.、thickness→THK、diameter→DIA、"
+            "stainless steel→S.S.、square tube→sq. tube、quantity→QTY、maximum→MAX、"
+            "approximately→approx.。缩写只用于普通名词，型号、材料牌号、标准号照抄不缩。\n"
+            "10. 只输出 JSON，不要任何解释文字。\n"
             "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
 
     def _build_messages(self, batch):
