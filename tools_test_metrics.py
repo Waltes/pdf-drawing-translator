@@ -374,7 +374,11 @@ def main():
             want = expect.split(":", 1)[1]
             good = (want in fixed) and ("fix" in got_lv)
         else:
-            good = ("warn" in got_lv) and (fixed == out)   # 报警但不动手
+            # 报警但不动手。warn / notice 都算 —— verify_metric_output 把
+            # 「同句单位个数对不上」这类启发式提示特意降成了 notice
+            # （见 translate.py 里那段注释：它按「数值紧跟单位」抽个数，
+            # 写法一变就误报，按 warn 报会让人以为图纸有错）。
+            good = (("warn" in got_lv) or ("notice" in got_lv)) and (fixed == out)
 
         tag = "OK  " if good else "FAIL"
         if good:

@@ -332,6 +332,10 @@ def normalize_metric_format(text):
       mm → 固定两位
       kg → ≥1 两位，<1 三位（轻小件补一位，避免 28g 被写成 0.03kg）
 
+    整数不补尾零：原文写 25 就留 25。50 与 50.00 在工艺上是两个精度等级，
+    补上去等于替客户加严了公差 —— 这也和提示词第 9 条（不补尾零）对齐。
+    所以这个函数只管「本来就是小数的值该写几位」，不管「整数要不要变成小数」。
+
     只认紧跟 mm / kg 的数字，DN50、M8×30、Rev E 这些没后缀的代号一律不碰。
     """
     if not text or ("mm" not in text.lower() and "kg" not in text.lower()):
@@ -342,6 +346,9 @@ def normalize_metric_format(text):
         try:
             v = Decimal(m.group(1))
         except Exception:
+            return m.group(0)
+        # 原文就是整数：原样返回，不补 .00
+        if "." not in m.group(1):
             return m.group(0)
         if unit == "kg":
             return _fmt_kg(float(v)) + m.group(2) + m.group(3)
@@ -914,7 +921,10 @@ def verify_metric_output(src, out, dst="zh", page=None, report=None,
     # 出口已经抹过一遍，这里是第二道。留着它的理由：万一以后有人改了出口顺序，
     # 或者 AI 通道的文本在上一步被别的东西重写过，这里还能兜住。
     # 英制侧没有这道：英寸是「整数-分数」，没有统一小数位可抹。
-    if mode == UNIT_METRIC:
+    #
+    # 只对原文含英制的条目做。没有英制就没有换算，也就没有「该写几位小数」
+    # 这回事 —— 硬抹一遍等于把原文的 25mm 改成 25.00mm，替客户加了精度要求。
+    if mode == UNIT_METRIC and has_imperial(src or ""):
         nf = normalize_metric_format(fixed)
         if nf != fixed:
             note("fix", i18n.T("小数位不符合规定位数，已统一"))
@@ -1526,6 +1536,10 @@ class Translator:
                 "thread and fastener specs (1/4\"-20, M8x30, NPT 1/2), standards (ANSI, ASTM, DIN, "
                 "GB, EN), model and drawing numbers (Rev E, A-3, DN50, SCH40), material grades, "
                 "dates, page numbers.\n"
+                "5b. Engineering symbols are copied verbatim — never substitute a look-alike "
+                "letter, digit or punctuation mark: ⌀ Ø ø φ is diameter, R is radius, ± is "
+                "tolerance, ° is degree, × is the times sign, □ is square, ▽ is surface finish, "
+                "①② are item numbers. Writing ø as @, ° as o, × as x or ± as + ruins the drawing.\n"
                 "6. In Chinese, \"寸\" used for pipes is a nominal size, not inches — write DN25, "
                 "DN32, DN40, DN50, DN80, DN100 for 1, 1.2, 1.5, 2, 3, 4 寸.\n"
                 "7. Do not leave words from the source language in the output (part numbers, units, "
@@ -1557,6 +1571,10 @@ class Translator:
             "5. 以下是标准件代号或编号，绝对不能换算、不能改写，原样照抄："
             "螺纹与紧固件规格（1/4\"-20、M8×30、NPT 1/2）、标准号（ANSI、ASTM、DIN、GB、EN）、"
             "型号与图号（Rev E、A-3、DN50、SCH40）、材料牌号、日期、页码。\n"
+            "5b. 工程符号原样保留，一个都不许换 —— 不许换成形状相近的字母、数字"
+            "或标点：⌀ Ø ø φ 是直径，R 是半径，± 是公差，° 是角度，× 是乘号，"
+            "□ 是方形，▽ 是表面粗糙度，①② 是序号。"
+            "把 ø 写成 @、把 ° 写成 o、把 × 写成 x、把 ± 写成 +，图纸就报废了。\n"
             "6. 中文里的「寸」用在管材（钢管、方管、圆管）上是俗称，不是英寸，"
             "要按公称直径写：1寸=DN25、1.2寸=DN32、1.5寸=DN40、2寸=DN50、3寸=DN80、4寸=DN100。"
             "这种地方写 DN 口径，不要写换算出来的毫米数。\n"
@@ -2132,12 +2150,23 @@ class Translator:
                         converted += 1
                         new = new2
             elif self.unit_mode == UNIT_METRIC:
+                touched = False
                 if has_imperial(new):
                     new2 = convert_to_metric(new)
                     if new2 != new:
                         converted += 1
+                        touched = True
                         new = new2
-                new = normalize_metric_format(new)
+                # 统一小数位这一步只对**真的换过单位**的条目做。
+                #
+                # 原来是无条件跑的，代价很实在：一条本来不必翻译、也不含英制的
+                # 尺寸标注（ø12mm、25mm、±0.5mm），被它补成 ø12.00mm、25.00mm。
+                # 文本一变，下游就认定「这是一条译文」，把原字擦掉重写 ——
+                # 上游 OCR 把 ø 认成 @ 的错，就这么被印到了图上（客户截图）。
+                # 补尾零本身也违背提示词第 9 条：50 和 50.00 在工艺上是两个
+                # 精度等级，凭空补零等于替客户加严公差。
+                if touched or has_imperial(raw):
+                    new = normalize_metric_format(new)
             # 换算完再独立复算一遍。这一步是给「模型自己算的数」上的保险：
             # 前面的 convert 只处理文本里还留着原单位的，
             # AI 已经把 4-1/8" 写成 100mm 的情况它根本看不见，

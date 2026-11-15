@@ -3602,6 +3602,60 @@ def _selftest():
         check(T("居中标题不贴着图框写"), False, f"{type(exc).__name__}: {exc}")
         check(T("不居中的标注仍靠左写"), False, f"{type(exc).__name__}: {exc}")
 
+    # 纯尺寸标注必须原样留着，不许被"重画"一遍。
+    #
+    # 客户报的病症是「ø 符号被翻译成了 @」。链条有三段：
+    #   ① 上游把符号弄坏（OCR 把 ø 认成 @ / 0 / ·，PDF 字体缺 ToUnicode 抽成 ·）；
+    #   ② 出口后处理无条件给 mm 值补两位小数（ø12mm → ø12.00mm），文本"变了"；
+    #   ③ 下游只判「变了没有」，于是擦掉原字、用我们的字体重写 → @12.00mm。
+    # 修法是②不再乱补、③改成比"内容"（same_content）而不是比字符串。
+    # 这一项盯的是③：一个内容没变的尺寸标注，排版层必须返回"不写"。
+    try:
+        from core import layout as _layout3
+        from core import image_text as _it3
+        from core import typography as _ty3
+        from core import translate as _tr3
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        page.draw_rect(pymupdf.Rect(20, 20, 340, 280), color=(0, 0, 0), width=1)
+        sp3 = _layout3.PageSpace(page)
+        box = pymupdf.Rect(60, 60, 130, 76)
+
+        # ① 符号被上游弄坏、内容却没变：这条必须原样保留
+        c_bad = {"text": "@12mm", "rect": box, "bg": (255, 255, 255),
+                 "fg": (0, 160, 0), "hint": "none", "vertical": False,
+                 "ink_h": 11.0}
+        kept = _it3._plan_one(c_bad, "@12mm", None, space=sp3) is None
+        check(T("坏符号的尺寸标注不会被重画"), kept,
+              "写成=%s（应为不写）" % (not kept))
+
+        # ② 尾零不再凭空补：25mm 不许变成 25.00mm
+        zero = _tr3.normalize_metric_format("25mm")
+        check(T("整数尺寸不再补两位小数"), zero == "25mm", "得到 %r" % zero)
+
+        # ③ 真有内容的仍然照翻（别把闸门关死）
+        c_ok = {"text": "外框正视图", "rect": box, "bg": (255, 255, 255),
+                "fg": (0, 160, 0), "hint": "zh", "vertical": False,
+                "ink_h": 11.0}
+        wrote = _it3._plan_one(c_ok, "Frame front view", None, space=sp3)
+        check(T("有可译内容的照常写"), bool(wrote) and wrote[1] == "Frame front view",
+              "写成=%s" % (wrote[1] if wrote else None))
+
+        # ④ 漏译清单不许把纯尺寸算进去（25mm 不是没翻，是不用翻）
+        check(T("纯尺寸不算漏译"), not _ty3.needs_translation("25mm")
+              and not _ty3.needs_translation("ø12mm")
+              and _ty3.needs_translation("3公斤"),
+              "25mm=%s ø12mm=%s 3公斤=%s" % (
+                  _ty3.needs_translation("25mm"),
+                  _ty3.needs_translation("ø12mm"),
+                  _ty3.needs_translation("3公斤")))
+        doc.close()
+    except Exception as exc:
+        for _k in ("坏符号的尺寸标注不会被重画", "整数尺寸不再补两位小数",
+                   "有可译内容的照常写", "纯尺寸不算漏译"):
+            check(T(_k), False, f"{type(exc).__name__}: {exc}")
+
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")
     report = head + "\n\n" + "\n".join(lines) + "\n\n" + \

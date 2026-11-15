@@ -469,17 +469,27 @@ def split_glued_text(text, vocab):
 # 尺寸链里的一个因子：数字（可带小数）+ 可选的毫米/厘米/米/英寸单位
 _DIM_FACTOR = r"\d+(?:\.\d+)?\s*(?:mm|cm|in)?"
 # 至少两个因子用 × / x / * 连起来，前后不能紧贴字母数字（M8×30 里的 8×30 不算）
+#
+# 前置断言只挡 ASCII 字母数字，不用 \w：\w 在 Python 3 里是 Unicode 语义，
+# ø Ø ⌀ ⌀ ± 这些符号全都算 \w，于是「ø12.00mm」被当成「紧贴字母」挡在门外，
+# 尾零收不回来。客户报的 ø12mm→@12.00mm 就卡在这里 —— 符号一坏，
+# 这条尺寸就永远带着 .00 回不去，进而被当成「有译文」重画一遍。
 _DIM_CHAIN = re.compile(
-    r"(?<![\w.])(" + _DIM_FACTOR + r"(?:\s*[×xX*]\s*" + _DIM_FACTOR + r")+)(?![\w.])",
+    r"(?<![A-Za-z0-9_.])(" + _DIM_FACTOR + r"(?:\s*[×xX*]\s*" + _DIM_FACTOR + r")+)"
+    r"(?![A-Za-z0-9_.])",
     re.IGNORECASE)
-# 单个带单位的数值。前置排除 ± 和字母，公差与型号进不来。
+# 单个带单位的数值。前置排除 ± 和 ASCII 字母数字，公差与型号进不来。
 # 只认「小数部分全是零」的那种（3.00mm、1000.00mm）——
 # 这一类必定是模型格式化出来的：原文写 3，它写成 3.00。
 # 像 101.60mm 这种是程序按英寸精确换算出来的（4" → 101.60mm），
 # 那个 0 表示精度到 0.01，砍掉就变成 101.6，等于把精度说小了一档，
 # 不能动。同理 1.20mm 也放过 —— 少省一个字符，换换算结果不被改，划算。
-_DIM_UNIT = re.compile(r"(?<![\w.±])"
-                       r"(\d+\.0+)(\s*)(mm|cm|in)(?![\w])", re.IGNORECASE)
+#
+# 前置断言同 _DIM_CHAIN，只挡 ASCII 字母数字：用 \w 的话「ø12.00mm」
+# 「Ø12.00mm」都收不回来（ø、Ø 在 Unicode 里是 \w），实测只有这两种
+# 写法会带着 .00 活到图上。± 仍然显式排除 —— 公差位数有含义。
+_DIM_UNIT = re.compile(r"(?<![A-Za-z0-9_.±])"
+                       r"(\d+\.0+)(\s*)(mm|cm|in)(?![A-Za-z0-9_])", re.IGNORECASE)
 # 拆因子用：数字 + 可选单位
 _FACTOR_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(mm|cm|in)?", re.IGNORECASE)
 # 乘号有多少种写法都归成一个，CAD 与模型混用时图上才整齐
@@ -533,3 +543,72 @@ def tighten_numbers(text):
     # 这一层不管空格（那是 normalize 的活），只砍尾零
     s = _DIM_UNIT.sub(lambda m: _trim_zeros(m.group(1)) + m.group(2) + m.group(3), s)
     return s
+
+
+# 比「两串文字内容是否相同」时，把数字的写法差异抹平
+_CONTENT_NUM = re.compile(r"\d+(?:\.\d+)?")
+
+
+def same_content(a, b):
+    """
+    两串文字是不是**同一个内容，只是写法不同**。用于决定「要不要擦掉重写」。
+
+    为什么需要这道判断：一条本来就该原样保留的文字（纯尺寸、纯代号），
+    只要被后处理动过哪怕一个字符，下游就会认为「这是一条译文」，
+    于是把原来的字擦掉、用它自己的字体重写一遍。上游任何一处不可靠
+    —— OCR 把 ø 认成 @、PDF 字体没有 ToUnicode 把 ⌀ 抽成 · ——
+    都会趁机被印到图上。客户报的 ø12mm 变 @12.00mm 正是这条路：
+    这条本来不必翻译，是后处理加的 .00 让它「看起来变了」。
+
+    抹平的是三件事：
+      · 数字的尾零与位数    12.00 == 12 == 12.0
+      · 所有空白            25 mm == 25mm
+      · 首尾空白
+    其余字符一律对照 —— 公斤 ≠ kg、@ ≠ ø，改了就要重写。
+
+    注意不能拿它当「译文是否合格」用：它只管写法，不管对错。
+    """
+    def canon(s):
+        s = re.sub(r"\s+", "", s or "")
+        return _CONTENT_NUM.sub(lambda m: _trim_zeros(m.group(0)), s)
+
+    return canon(a) == canon(b)
+
+
+# 数值连同后缀单位，作为一个整体剥掉（12mm、0.5kg）。单位不是「可译的词」，
+# 必须成对剥才干净 —— 单剥 mm 的话，ø12mm 里的 mm 会残留成「一个词」。
+_NUM_UNIT_TOK = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:mm|cm|km|m|kg|mg|g|ml|l|in|inch|inches|ft|foot|feet"
+    r"|lbs|lb|oz|pcs|pc)", re.IGNORECASE)
+_PLAIN_NUM = re.compile(r"\d+(?:[.,]\d+)?")
+_NON_WORD = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff\u3040-\u30ff]+")
+# 汉字/假名：一个字就算内容（「门」也要译）
+_HAS_CJK = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff]")
+# 拉丁字母：要求连续两个以上。单个字母在图纸上必然是代号或序号
+# （R5 半径、M8 螺纹、H7 公差、A 剖切位置），没有一个是「词」，
+# 送去翻译只会被改写。两个以上才算真有词（DN、THK、QTY、Panel）。
+_HAS_LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
+
+
+def needs_translation(text):
+    """
+    这条文字里到底有没有「需要翻译的内容」。
+
+    判据：把数字连同单位、以及所有标点符号剥掉之后，还剩不剩汉字或拉丁字母词。
+
+      25mm / ø12mm / ±0.5mm / 90° / 0.75mm   → 没有（纯尺寸，不该动）
+      R5 / M8×30 / Ø50 H7 / 100l / 1/4"-20    → 没有（单字母代号，不该动）
+      DN50 / SCH40 / 3公斤 / Panel / 外框正视图 → 有（真要处理）
+
+    必须连单位一起剥：`ø12mm` 里的 mm 满足「有没有拉丁字母」这个粗暴判据，
+    于是纯尺寸标注被当成英文标注，既被后处理改写、又被记进漏译清单。
+    客户看到清单上写着「25mm 未译」只会以为工具没干活。
+
+    单字母不算词：拿 R5 去翻译，模型会把它当缩写展开或改大小写，
+    而图上 R5 就是半径 5，一个字符都不能动。
+    """
+    s = text or ""
+    s = _NUM_UNIT_TOK.sub(" ", s)
+    s = _PLAIN_NUM.sub(" ", s)
+    s = _NON_WORD.sub(" ", s)
+    return bool(_HAS_CJK.search(s) or _HAS_LATIN_WORD.search(s))

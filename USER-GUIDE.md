@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.7
+Version 1.1.8
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.7.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.8.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -954,6 +954,39 @@ Why the limit is an absolute 5.5 pt rather than a ratio: a 16 pt heading shrunk 
 also 55% and is a grey line. Similar ratios, entirely different readability, so the check has
 to be on absolute size.
 
+### 9.9 Dimensions and symbols are never "tidied up"
+
+A pure dimension label such as `ø12mm` is left **completely untouched**. The original glyphs
+are correct; by not redrawing them we cannot damage them.
+
+This rule had to be added. Earlier versions turned it into `@12.00mm`, through three small
+concessions at three different stages:
+
+1. Text extraction read `ø` as `@` (or `0`, `·`, `.`) — six diameter spellings across twelve
+   font/size combinations were tested and almost none came out intact;
+2. The decimal-normalising step unconditionally padded millimetre values to two places,
+   turning `12mm` into `12.00mm`, so the text "changed";
+3. The rewrite step only asked "did it change?", so it treated the result as a translation —
+   erased the original glyphs and drew them again with our font, printing the misread
+   character onto the drawing.
+
+All three are fixed: only entries that actually underwent an imperial conversion get their
+decimals normalised; the rewrite step compares *content* rather than strings (`12.00` and `12`
+are the same content, `@` and `ø` are not); and whole numbers never get trailing zeros.
+
+Three consequences:
+
+- **Single-letter codes stay put**: `R5`, `M8×30`, `H7` are not sent for translation. A model
+  may expand them or change their case, and on the drawing `R5` means radius 5.
+- **A unit suffix is not a word**: the `mm` in `25mm` is a unit. Judging by "has a letter" made
+  pure dimensions look like English labels and sent them to the model when translating into Chinese.
+- **Pure dimensions are not listed as untranslated**: "25mm untranslated" in the report only
+  makes people think the tool did nothing.
+
+One related fix: `ø` (lowercase o-slash) is now recognised as a diameter marker alongside
+`Ø`, `⌀`, `φ` and `Φ`. Only the latter four were recognised before, yet lowercase `ø` is the
+most common form on real drawings.
+
 Digits that carry meaning are never touched: tolerances (`±0.50`), radii (`R0.50`), threads
 (`M8×1.25`), thousands separators (`1,000`), and values produced by unit conversion (`4"`
 converted to `101.60mm`, where the zero means precision to 0.01).
@@ -1028,7 +1061,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.7.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.8.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 

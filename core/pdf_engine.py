@@ -173,12 +173,17 @@ def detect_lang(text: str) -> str:
     """
     判断这段文字该往哪个方向翻：
       含汉字        -> 'zh'   需要转英文
-      有字母        -> 'en'   需要转中文
+      有可译的字母  -> 'en'   需要转中文
       纯符号数字    -> 'none' 不需要翻译
+
+    「有可译的字母」这一条不能写成「有字母」：ø12mm、25mm、0.75kg 里的 mm/kg
+    是单位后缀，不是词。按「有字母」判的话，这类纯尺寸在英译中方向会被送进模型，
+    模型一高兴就把 ø 写成 @、把 12 写成 12.00（客户报的就是这个）。
+    判定交给 typography.needs_translation，它先把「数字+单位」整体剥掉再看。
     """
     if has_chinese(text):
         return "zh"
-    if re.search(r"[A-Za-z]", text or ""):
+    if re.search(r"[A-Za-z]", text or "") and typography.needs_translation(text):
         return "en"
     return "none"
 
@@ -1751,6 +1756,21 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 # 后面基于符号的正则换算就认不出来了。数值一律用自己算的。
                 if kind == "size":
                     new_text = convert_units(text, unit_mode)
+
+                # 内容和原文一样（只差数字尾零、空格这些写法）就什么都别做。
+                #
+                # 原来这里只判 `new_text != text`，于是「25mm → 25.00mm」这种
+                # 纯粹由后处理补出来的差异也被当成译文：原字被擦掉、用我们的
+                # 字体重写一遍。上游一旦把符号弄错（OCR 把 ø 认成 @、
+                # PDF 字体缺 ToUnicode 把 ⌀ 抽成 ·），错字就印到图上了 ——
+                # 客户报的 ø12mm 变 @12.00mm 正是这条路。
+                #
+                # 只有「原文里既无汉字也无拉丁字母」才静默跳过（纯尺寸、纯代号，
+                # 本来就不需要处理）。别的条目内容没变就是没翻出来，要照常记漏译，
+                # 不能在这里把真实的失败悄悄吃掉。
+                if typography.same_content(new_text, text) and \
+                        not typography.needs_translation(text):
+                    continue
 
                 # 上一版自己写下的说明行（「原图英寸，已换算」/
                 # 「converted from inch」）：整块擦掉，不重写。

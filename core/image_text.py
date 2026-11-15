@@ -106,11 +106,16 @@ def ocr_lang(text):
 
     假名也并按 zh 处理：翻译器只认中英两种提示，判成 ja 会被当成
     「认不出的语种」，结果是不翻，比按中文处理更糟。
+
+    「有拉丁字母」这一条要过 typography.needs_translation：
+    ø12mm、25mm、0.75kg 里的 mm/kg 是单位后缀，不是词。只看字母的话，
+    纯尺寸会被判成英文送进模型 —— 方向上是英译中时正好走这条路，
+    模型把 ø 写成 @、把 12 写成 12.00，客户在图上看到的就是 @12.00mm。
     """
     text = text or ""
     if _CJK_RE.search(text) or _KANA_RE.search(text):
         return "zh"
-    if _LATIN_RE.search(text):
+    if _LATIN_RE.search(text) and typography.needs_translation(text):
         return "en"
     return "none"
 
@@ -1342,7 +1347,7 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     这段原先内联在 process_page_images 里，v1.0.8 抽出来是为了让复核打回后
     的重写走完全相同的排版规则 —— 两条路径各写一份，迟早会走偏。
     """
-    if not out or not out.strip() or out.strip().upper() == c["text"].upper():
+    if not out or not out.strip():
         if untranslated is not None:
             untranslated.append(("图片内文字", c["text"]))
         return None
@@ -1353,6 +1358,26 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 一处白长两三个字符，长句就被挤得缩字号。这里先收回原件的长度，
     # 后面算字号拿到的才是真实宽度。
     out = typography.tighten_numbers(out)
+    # 内容与原文一样 —— 只在写法上绕了一圈。这里必须停手。
+    #
+    # 为什么（客户报的 ø12mm → @12.00mm 就是漏了这一道）：
+    # 一条纯尺寸标注（ø12mm、25mm）不需要翻译，翻译通道原样返回，
+    # 下游只看到「文本变了」就去擦掉原字重写。可上游并不可靠 ——
+    # OCR 会把 ø 认成 @ / 0 / ·，PDF 字体缺 ToUnicode 会把 ⌀ 抽成 ·。
+    # 原图上的字是对的，我们一重写就把错字印了上去。
+    # same_content 只抹平数字尾零和空白，符号差一个都算不同
+    # （公斤≠kg、@≠ø），真该翻译的条目一条都不会被拦下。
+    if (typography.same_content(out, c["text"])
+            or out.strip().upper() == c["text"].strip().upper()):
+        # 原文里没有可译内容（纯数字、纯单位、纯符号）：
+        # 它本来就不需要处理，别记成漏译 —— 那种清单上出现 25mm、70mm
+        # 只会让客户以为工具没干活。
+        if not typography.needs_translation(c["text"]):
+            return None
+        # 有可译内容却没变，这是真的没翻出来，如实记一笔
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
     if font_cjk is None:
         font_cjk = _get_cjk_font()
     if font_latin is None:

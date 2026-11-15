@@ -76,6 +76,11 @@ EN = {
     "居中标题译文变长后重心不动": "centred title keeps its centre when the text grows",
     "居中标题不贴着图框写": "centred title keeps clear of the border",
     "不居中的标注仍靠左写": "left-aligned labels stay left-aligned",
+    "坏符号的尺寸标注不会被重画":
+        "a dimension label with a damaged symbol is left untouched",
+    "整数尺寸不再补两位小数": "whole-number dimensions keep no trailing zeros",
+    "有可译内容的照常写": "text with real content is still translated",
+    "纯尺寸不算漏译": "pure dimensions are not reported as untranslated",
     "OCR 组件不可用，跳过": "OCR unavailable, skipped",
     "{name} 计量数据校验清单": "{name} — measurement check report",
     "怎么读这份清单：\n  已纠正 —— 程序按原文重新算过并改正的，不用处理，核对一眼即可；\n  待确认 —— 程序判不准（多半是同句里数量对不上），请对照原图核实。\n\n":
