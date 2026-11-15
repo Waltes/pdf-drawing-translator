@@ -375,6 +375,7 @@ EN = {
     " · 启动失败": " · Startup failed",
     " · 自检": " · Self-test",
     "客户锁定译名不被机翻改掉": "client-locked terms survive machine translation",
+    "客户叫法只管标注不管整句": "client terms apply to labels only, not to full sentences",
     "PDF 图纸翻译 · 自检": "PDF Drawing Translator · Self-test",
     "详细信息已写入：": "Details written to:",
     "这个 Python 没有图形界面组件 tkinter，程序无法显示窗口。\n\n解决办法：用程序目录里的「启动.bat」启动，它会自动挑一个带 tkinter 的 Python；或者安装 python.org 的完整版 Python，安装时勾选 tcl/tk 组件。":

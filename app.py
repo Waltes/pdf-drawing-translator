@@ -3783,7 +3783,10 @@ def _selftest():
         _tr9 = Translator(load_config())
         _lk = getattr(_tr9.glossary, "locked", {}) or {}
         if not _lk:
+            # 通用版没有锁定词，两项都登记成跳过 —— 两版自检项数保持一致，
+            # 客户报「57 项」还是「58 项」时不会以为是装错了版本
             check(T("客户锁定译名不被机翻改掉"), True, "本版无锁定词，跳过")
+            check(T("客户叫法只管标注不管整句"), True, "本版无锁定词，跳过")
         else:
             _miss = []
             for _zh, (_want, _wrongs) in _lk.items():
@@ -3796,6 +3799,36 @@ def _selftest():
             check(T("客户锁定译名不被机翻改掉"), not _miss,
                   "%d 条锁定词，%s" % (len(_lk), "全部生效" if not _miss
                                       else "没改回来：" + "、".join(_miss)))
+
+            # 这一项管两边：整句里不许硬改，标注（含标题这种名词短语）仍要改。
+            # 客户 2026-11-15 明确「出现在整句或文章里就不用遵守对译规则」，
+            # 判据见 Translator._is_label。只测「不改」的话，一个永远返回
+            # False 的 _is_label 也能过 —— 那等于把功能关掉了还报通过。
+            _zh0 = next(iter(_lk))
+            _ok0 = _lk[_zh0][0].lower()          # 客户要的写法
+            _w0 = (_lk[_zh0][1] or ["wrong"])[0].lower()   # 机翻常给出的错写法
+            _nochange = [
+                "底层采用%s堆叠，按颜色分区" % _zh0,
+                "底层采用%s堆叠" % _zh0,
+                "%s堆叠时应错位码放以免倾倒，装柜前用缠绕膜固定" % _zh0,
+            ]
+            _yeschange = [
+                _zh0,
+                "临时%s俯视图" % _zh0,
+                "3.05米%s示意图" % _zh0,
+            ]
+            _bad = []
+            for _s in _nochange:
+                if _tr9._apply_locked_terms(_s, "Text with %s inside" % _w0) \
+                        != "Text with %s inside" % _w0:
+                    _bad.append("整句被改：" + _s)
+            for _s in _yeschange:
+                if _ok0 not in _tr9._apply_locked_terms(
+                        _s, "Text with %s inside" % _w0).lower():
+                    _bad.append("标注没改：" + _s)
+            check(T("客户叫法只管标注不管整句"), not _bad,
+                  "锁定 %d 条；整句 3 例不动、标注 3 例照改" % len(_lk)
+                  if not _bad else "；".join(_bad))
     except Exception as exc:
         check(T("客户锁定译名不被机翻改掉"), False,
               f"{type(exc).__name__}: {exc}")

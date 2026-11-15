@@ -1618,14 +1618,16 @@ class Translator:
 
     def _edition_rule(self):
         """
-        定制版追加到系统提示词的段落：行业标签 + 客户锁标术语。
+        定制版追加到系统提示词的段落：行业标签 + 客户指定的叫法。
 
-        为什么不只靠术语库：
-            术语库只在「整词命中」时生效。词出现在句子中间、被拆开写、
-            带前后缀、或者和尺寸混在一起时都可能漏网，漏了就交给模型自由发挥。
-            而「客户锁标」的意思是这份图纸上这个词只能这么写，没有发挥空间。
-            所以同一批词既进词库（管逐词通道），也进提示词（管整句通道），
-            两条通道都堵住才算锁住。
+        为什么只对独立标注生效：
+            词表里那几条是客户的叫法，不是通用英文。它们是图纸上单独写着的
+            部件名、标题栏品名，那时必须照写；可这些词也会出现在整句里
+            （「底层采用托盘堆叠，按颜色分区」），那时硬塞进去，英文会变成
+            一句看着像机翻贴片的话。客户明确要求整句按正常行文翻。
+
+            所以提示词里同时交代两件事：单独标注照写、整句不必。只交代前者，
+            模型会连整句一起塞——它在「必须照此写」面前没有分寸感。
 
         通用版返回空串，提示词一个字都不变 —— 免得改这一处影响到已交付的版本。
         """
@@ -1633,25 +1635,32 @@ class Translator:
             return ""
 
         terms = self._edition_terms()
+        # industry() 自己会按界面语言挑行业标签，调用方不用再分一次
         ind = edition.industry()
         sep = "; " if i18n.is_en() else "、"
         if i18n.is_en():
             head = "Client-locked edition"
             if ind:
                 head += " (%s)" % ind
-            head += ". The following renderings are fixed by the client — whenever the "
-            head += "concept appears, write exactly this, do not pick a synonym:\n"
+            head += ". These are the client's own terms: use them verbatim for "
+            head += "standalone labels and title-block part names, but when they "
+            head += "appear inside a full sentence or running text, translate "
+            head += "normally and do not force these words in: "
+            tail = ""
         else:
             head = "术语锁定"
             if ind:
                 head += "（本版面向%s）" % ind
-            head += "。以下译名由客户指定，译文里出现对应概念时必须照此写，不许换同义词：\n"
+            head += "。以下是客户自己的叫法：图纸上单独写着的部件标注、标题栏品名按此写；"
+            tail = "这些词出现在整句或成段说明里时，按英文正常行文翻译，不必硬塞进来："
         if not terms:
-            return head
+            return head + ("." if i18n.is_en() else "。") + "\n"
+        if not tail:
+            return head + sep.join(terms) + ".\n"
         # 分隔符跟随提示词语言：中文提示词里用顿号，英文提示词里用分号。
         # 混着用不影响模型理解，但英文提示词里出现一串顿号，会让这段读起来
         # 像是从别处粘过来的，模型对这些「不像正常英文」的片段会更随意
-        return head + sep.join(terms) + ("." if i18n.is_en() else "。") + "\n"
+        return head + tail + sep.join(terms) + ("." if i18n.is_en() else "。") + "\n"
 
     def _edition_terms(self):
         """
@@ -2285,6 +2294,62 @@ class Translator:
         self.metric_converted = getattr(self, "metric_converted", 0) + converted
         return results
 
+    # 一条原文里，除了客户锁定的词以外最多还允许几个汉字。超过就是罗列一大堆
+    # 东西的名词串，当句子处理。
+    #
+    # 8 是量着客户图纸上的实际写法定的：临时护栏托盘俯视图（5）、
+    # 3.05米护栏托盘示意图（4）都在这条线内，是标注。
+    LABEL_MAX_FILLER = 8
+
+    # 出现这些就说明有谓语或连接结构 —— 这是句子，不是标注。
+    #
+    # 为什么用词表而不是数汉字：名词短语可以很长（临时护栏托盘俯视图），
+    # 句子可以很短（底层采用托盘堆叠）。字数分不开这两类，谓语能。
+    # 「采用」「使用」「安装」这些是图纸说明句里最常见的谓语；
+    # 「以免」「防止」「注意」是常见的连接/祈使。
+    SENTENCE_WORDS = (
+        "采用", "使用", "通过", "进行", "需要", "必须", "不得", "可以",
+        "应当", "应按", "如果", "因为", "所以", "以便", "以免", "防止",
+        "避免", "注意", "安装", "焊接", "固定", "放置", "堆放", "堆叠",
+        "码放", "包装", "装入", "连接", "组装", "拆卸", "调节", "拧紧",
+        "粘贴", "贴上", "分别", "依次", "同时", "然后",
+    )
+
+    def _is_label(self, src):
+        """
+        这条原文是不是「一个独立的标注」，而不是整句或成段文字。
+
+        为什么需要这个判断：
+            客户要的是「托盘」这类词单独出现在图上时按他的对译写。可这些词
+            也会出现在整句里（「底层采用托盘堆叠」），那时按他的对译硬塞进去，
+            英文会变成一句看着像机翻贴片的话。客户明确说了：出现在整句或
+            文章里就不必遵守（2026-11-15）。
+
+        判据三条：
+            1. 有谓语或连接结构（见 SENTENCE_WORDS）—— 这是句子
+            2. 剥掉锁定词、数字、单位、符号后剩的汉字太多 —— 罗列式的长串
+            3. 长度超过三十字 —— 多半是 OCR 把相邻几行合成了一条
+
+        不用「有逗号就算句子」：图纸上「托盘最下层，蓝色部分」这种标注带逗号，
+        可它并不是句子，硬按句子处理反而漏掉了客户要的叫法。
+        """
+        src = (src or "").strip()
+        if not src:
+            return False
+        if any(w in src for w in self.SENTENCE_WORDS):
+            return False
+        # 成段文字直接排除。图纸上不会有三十个字的独立标注，
+        # 这么长的多半是 OCR 把相邻几行合成了一条。
+        if len(src) > 30:
+            return False
+        rest = src
+        for zh in (getattr(self.glossary, "locked", {}) or {}):
+            rest = rest.replace(zh, "")
+        # 数字、字母、单位符号都不算「句子成分」
+        rest = re.sub(r"[0-9A-Za-z%‰+\-–—./\\×*=#@&'\"()\[\]{}<>±°øØ⌀φΦ\s]", "",
+                      rest)
+        return len(rest) <= self.LABEL_MAX_FILLER
+
     def _apply_locked_terms(self, src, out):
         """
         把客户锁定的译名按回去。返回修正后的译文。
@@ -2295,6 +2360,10 @@ class Translator:
             单位换算当初就是逐个加，漏了一条路径，客户在图纸上看到
             英制数字（v1.1.5 修的就是这个）。同一个坑不踩第二次。
 
+        为什么只对独立标注生效（见 _is_label）：
+            词表里那几条是客户的叫法，不是通用英文。它们在整句里未必成立，
+            硬换会让整句读起来别扭。所以这里只管「图上单独写着的那个词」。
+
         只改「原文确实有这个中文词」且「译文里没出现指定译名」的条目。
         两个条件都满足才动手：原文没有这个词，译文里出现同名英文属于
         正常翻译（pallet 在别的句子里可能真的该写 pallet）；
@@ -2302,6 +2371,8 @@ class Translator:
         """
         locked = getattr(self.glossary, "locked", None)
         if not locked or not src or not out:
+            return out
+        if not self._is_label(src):
             return out
         for zh, (want, wrongs) in locked.items():
             if zh not in src:
