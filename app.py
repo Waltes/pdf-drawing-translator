@@ -3551,6 +3551,57 @@ def _selftest():
         check(T("空间感知认得出图框与空白"), False, f"{type(exc).__name__}: {exc}")
         check(T("两条相邻标注各写各的不叠"), False, f"{type(exc).__name__}: {exc}")
 
+    # 居中式标题：译文比原文长一倍时，重心必须原地不动，也不能一路长到图框线上。
+    #
+    # 客户报的病症是「原本在正中的标题，翻译后偏向一侧」「还有的几乎要出格子」。
+    # 成因是排版只会「左端固定往右长」和「右端固定往左长」两种长法 ——
+    # 文本一长一倍，重心必然被推走一半增量。这里造一页最小可复现的样本：
+    # 标题对着下面的图形居中，译文长度是原文的两倍多。
+    try:
+        from core import layout as _layout2
+        from core import image_text as _it2
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        page.draw_rect(pymupdf.Rect(20, 20, 340, 280), color=(0, 0, 0), width=1)
+        # 标题所标注的图形：中心 180，比标题宽一倍以上
+        page.draw_rect(pymupdf.Rect(120, 120, 240, 210), color=(0, 0, 0),
+                       fill=(0.75, 0.75, 0.75), width=1)
+        sp2 = _layout2.PageSpace(page)
+
+        # 标题框中心 180 = 图形中心，原件里就是居中的
+        ct = {"text": "外框正视图", "rect": pymupdf.Rect(155, 60, 205, 75),
+              "bg": (255, 255, 255), "fg": (0, 160, 0), "hint": "zh",
+              "vertical": False, "ink_h": 9.0}
+        _it2._assign_align(page, [ct], sp2)
+        got = _it2._plan_one(ct, "Exterior Front View", None, space=sp2)
+        shifted = (abs((got[7].x0 + got[7].x1) / 2.0 - 180.0) if got else 99.0)
+        # 安全边距：字高 9pt，至少要离图框 9pt（框在 20 / 340 上）
+        margin = (min(got[7].x0 - 20.0, 340.0 - got[7].x1) if got else -1.0)
+        check(T("居中标题译文变长后重心不动"),
+              bool(got) and ct.get("align") == "center" and shifted <= 9.0 * 0.5 + 0.01,
+              "认出居中=%s 重心偏移=%.2fpt" % (ct.get("align") == "center", shifted))
+        check(T("居中标题不贴着图框写"), bool(got) and margin >= 9.0 - 0.01,
+              "离框边=%.2fpt 需要≥9pt" % margin)
+
+        # 反面：不居中的标注不许被当成居中处理（左端应保持不动）
+        ca = {"text": "蓝色部分", "rect": pymupdf.Rect(40, 60, 80, 75),
+              "bg": (255, 255, 255), "fg": (0, 160, 0), "hint": "zh",
+              "vertical": False, "ink_h": 9.0}
+        _it2._assign_align(page, [ca], sp2)
+        pa = _it2._plan_one(ca, "Blue parts", None, space=sp2)
+        left_kept = bool(pa) and abs(pa[7].x0 - 40.0) <= 1.0
+        check(T("不居中的标注仍靠左写"),
+              ca.get("align") is None and left_kept,
+              "误判居中=%s 左端=%.1f(应40)" % (ca.get("align") == "center",
+                                              pa[7].x0 if pa else -1))
+        doc.close()
+    except Exception as exc:
+        check(T("居中标题译文变长后重心不动"), False,
+              f"{type(exc).__name__}: {exc}")
+        check(T("居中标题不贴着图框写"), False, f"{type(exc).__name__}: {exc}")
+        check(T("不居中的标注仍靠左写"), False, f"{type(exc).__name__}: {exc}")
+
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")
     report = head + "\n\n" + "\n".join(lines) + "\n\n" + \

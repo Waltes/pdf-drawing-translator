@@ -942,6 +942,14 @@ def process_page_images(page, translate_fn, used_rects, report,
     # 等每条算完再回头对齐，等于让后算的去迁就先算的。
     _assign_size_classes(candidates, outs)
 
+    # v1.1.7：标出哪些是「对着图形居中」的标题。也要在排版之前做完 ——
+    # 它决定译文往哪边长（绕重心对称长，还是一头固定往另一头伸）。
+    # 放在归类和占用图之后：判据要用到实测字高和页面占用情况。
+    try:
+        _assign_align(page, candidates, space)
+    except Exception:
+        pass
+
     plans = []
     for c, out in zip(candidates, outs):
         plan = _plan_one(c, out, untranslated, font_cjk, font_latin,
@@ -1121,13 +1129,31 @@ def _balanced_two(font, text, size):
     return best[1] if best else None
 
 
-def _candidates(r, size, width, n_lines, gap, shift_x, shift_y):
+def _drift_steps(drift):
+    """
+    重心允许让位时，从小到大试的几个位置：先原地，再半个字高，最后一个字高。
+
+    顺序就是优先级 —— _place_for_size 取第一个放得下的，所以先试偏移小的，
+    能少挪就少挪。左右都给，是因为挡住它的可能是左边也可能是右边。
+    """
+    if drift <= 0:
+        return [0.0]
+    return [0.0, -drift * 0.5, drift * 0.5, -drift, drift]
+
+
+def _candidates(r, size, width, n_lines, gap, shift_x, shift_y,
+                align="left", drift=0.0, anchor_fallback=True):
     """
     在预算之内，这条译文能落在哪几个位置。
 
-      · 左右：沿原基线加宽，左端不动或右端不动，各一个候选
+      · 居中（align="center"）：绕原框重心对称加宽，重心原地不动
+      · 靠边（align="left"）：沿原基线加宽，左端不动或右端不动，各一个候选
       · 上下：整条上移一行、整条下移一行
-    左对齐、右对齐都留着，是为了译文比原文短的时候仍贴着原来的对齐方向。
+
+    为什么必须分这两种：视图标题在原件里是「对着图形居中」的，不是齐左。
+    只有左右两个候选时，译文比原文长一倍，重心必然被推走一半长度 ——
+    实测第 2 页四个标题右移 40~45pt（视图中线在 247，标题跑到 292），
+    第 1 页那个还顶到了图框线上。居中文字就该两头一起长。
 
     横竖分开给预算：左右延伸还在同一条基线上，读起来还是同一个信息点；
     上下挪动会把它从原来那一行挪走，客户一眼看出「这两条不挨着了」。
@@ -1135,8 +1161,17 @@ def _candidates(r, size, width, n_lines, gap, shift_x, shift_y):
     desc = size * typography.DESCENDER
     base0 = r.y1 - desc
     out = []
-    if width <= r.width + shift_x:
-        # 右端生长（左对齐保持）与左端生长（右对齐保持）
+    if align == "center":
+        # 对称加宽：左右各长一半。预算按两侧一起算，所以是 2 倍 shift_x
+        if width <= r.width + 2 * shift_x:
+            cx = (r.x0 + r.x1) / 2.0
+            for off in _drift_steps(drift):
+                out.append(_box_from(cx + off - width / 2.0, base0,
+                                     size, width, n_lines))
+    if width <= r.width + shift_x and (align != "center" or anchor_fallback):
+        # 右端生长（左对齐保持）与左端生长（右对齐保持）。
+        # 居中的那几条只在最后兜底时才允许退回这两种长法 ——
+        # 它们是「重心跑掉」的根源，但总比留着一串英文强。
         out.append(_box_from(r.x0, base0, size, width, n_lines))
         out.append(_box_from(r.x1 - width, base0, size, width, n_lines))
     # 上移：基线抬到原框上沿再加 gap
@@ -1149,7 +1184,9 @@ def _candidates(r, size, width, n_lines, gap, shift_x, shift_y):
     return out
 
 
-def _place_for_size(space, r, font, out, size, shift_x, shift_y, ignore=None):
+def _place_for_size(space, r, font, out, size, shift_x, shift_y, ignore=None,
+                    align="left", drift=0.0, safe=None, anchor_fallback=True,
+                    allow_wrap=True, pad=None):
     """
     在给定字号上找一个能写下的位置，返回 (写框, 行列表) 或 None。
 
@@ -1157,21 +1194,31 @@ def _place_for_size(space, r, font, out, size, shift_x, shift_y, ignore=None):
     能在原框里一行写完，就不折成两行，看着更像原图。
 
     ignore 只传本条自己的填充框：那块马上要被涂成背景，不算障碍。
+    align/drift：见 _candidates（居中文字绕重心长）。
+    safe：离图框的安全区，见 layout.PageSpace.is_clear。
+    allow_wrap：标题通常不许折行 —— 同一页几个标题，一个折成两行、
+    其余一行，比整体缩一成字更扎眼。折行的开关在 _search 第二档才打开。
+    pad：与旁边内容要留的净空，None 用 layout.EXTRA_CLEAR（0.3pt）。
     """
     gap = max(1.2, size * 0.15)
     variants = [(1, [out])]
-    two = _balanced_two(font, out, size)
+    two = _balanced_two(font, out, size) if allow_wrap else None
     if two:
         variants.append((2, two))
     for n, lines in variants:
         width = max(font.text_length(seg, fontsize=size) for seg in lines)
-        for box in _candidates(r, size, width, n, gap, shift_x, shift_y):
-            if space.is_clear(box, ignore=ignore):
+        for box in _candidates(r, size, width, n, gap, shift_x, shift_y,
+                               align=align, drift=drift,
+                               anchor_fallback=anchor_fallback):
+            opts = {} if pad is None else {"pad": pad}
+            if space.is_clear(box, ignore=ignore, safe=safe, **opts):
                 return box, lines
     return None
 
 
-def _best_size(space, r, font, out, lo, hi, shift_x, shift_y, ignore):
+def _best_size(space, r, font, out, lo, hi, shift_x, shift_y, ignore=None,
+               align="left", drift=0.0, safe=None, anchor_fallback=True,
+               allow_wrap=True, pad=None):
     """
     在 [lo, hi] 里二分找「放得下且有地方放」的最大字号。
 
@@ -1186,13 +1233,98 @@ def _best_size(space, r, font, out, lo, hi, shift_x, shift_y, ignore):
     for _ in range(9):
         mid = (lo + hi) / 2
         got = _place_for_size(space, r, font, out, mid, shift_x, shift_y,
-                              ignore=ignore)
+                              ignore=ignore, align=align, drift=drift,
+                              safe=safe, anchor_fallback=anchor_fallback,
+                              allow_wrap=allow_wrap, pad=pad)
         if got is not None:
             best = (mid, got[0], got[1])
             lo = mid
         else:
             hi = mid
     return best
+
+
+def _pick(cur, cand, r, ink, align):
+    """
+    两个候选里挑一个：字号大的优先，但「重心挪了多少」要折价。
+
+    折价换算见 typography.CENTER_DRIFT_COST：重心每偏一个字高，折一成字号。
+    所以偏半个字高只换来一成以内的字号，就守着重心不要动 ——
+    标题缩一成的字读者看不出，从视图中线偏出去一眼就看得出。
+
+    非居中的文字没有重心可言（靠左就是靠左），只比字号。
+    """
+    if cand is None:
+        return cur
+    if cur is None:
+        return cand
+
+    def worth(p):
+        size, box = p[0], p[1]
+        if align != "center" or ink <= 0:
+            return size
+        off = abs((box.x0 + box.x1) / 2.0 - (r.x0 + r.x1) / 2.0) / ink
+        return size * (1.0 - typography.CENTER_DRIFT_COST * min(off, 1.0))
+
+    return cand if worth(cand) > worth(cur) + 1e-6 else cur
+
+
+def _search(space, r, font, out, lo, hi, glyph_h, align, safe,
+            widen, budget, ignore=None, pad=None):
+    """
+    四轮试探，一轮比一轮让步，返回「最值得要」的那个落点（字号, 框, 行）。
+
+      第一轮 原地不动，重心也不动
+      第二轮 沿基线加宽（居中的对称加宽，靠边的按原对齐方向长）
+      第三轮 居中的才走：允许重心让半个字高，换更大的字号
+      第四轮 上下挪一行（最后手段：一挪就不再和原来那条标注挨着）
+
+    每一轮的结果都交给 _pick 折价比较，不是简单的「能放下就用」。
+    原因是位置和字号是两件互相能换的东西：标题缩一成的字，读者看不出；
+    从视图中线偏出半个字高，一眼就看得出。
+
+    标题额外守一条：**先保一行**。折成两行的标题，字号能大一点，
+    但同一页里三个标题两个一行、一个两行，比整体缩一成字更扎眼
+    （实测第 2 页「Exterior top view」就是这么被折成两行的）。
+    所以标题先按「不许折行」找一遍，能到类字号的九成就用；
+    到了九成才说明这一行真的排不下，才允许折。
+    """
+    def rounds(allow_wrap):
+        best = _best_size(space, r, font, out, lo, hi, 0.0, 0.0,
+                          align=align, safe=safe, anchor_fallback=False,
+                          allow_wrap=allow_wrap, pad=pad, ignore=ignore)
+        if best is None or best[0] < hi * typography.CLASS_FLOOR:
+            best = _pick(best, _best_size(space, r, font, out, lo, hi,
+                                          widen, 0.0, align=align,
+                                          safe=safe, anchor_fallback=False,
+                                          allow_wrap=allow_wrap, pad=pad,
+                                          ignore=ignore),
+                         r, glyph_h, align)
+        if align == "center" and (best is None
+                                  or best[0] < hi * typography.CLASS_FLOOR):
+            best = _pick(best, _best_size(space, r, font, out, lo, hi,
+                                          widen, 0.0, align=align,
+                                          drift=glyph_h * typography.CENTER_DRIFT_EM,
+                                          safe=safe, anchor_fallback=False,
+                                          allow_wrap=allow_wrap, pad=pad,
+                                          ignore=ignore),
+                         r, glyph_h, align)
+        if best is None or best[0] < hi * typography.CLASS_FLOOR:
+            best = _pick(best, _best_size(space, r, font, out, lo, hi,
+                                          widen, budget, align=align,
+                                          drift=glyph_h * typography.CENTER_DRIFT_EM,
+                                          safe=safe, anchor_fallback=False,
+                                          allow_wrap=allow_wrap, pad=pad,
+                                          ignore=ignore),
+                         r, glyph_h, align)
+        return best
+
+    if align == "center":
+        one = rounds(allow_wrap=False)
+        if one is not None and one[0] >= hi * typography.CLASS_FLOOR:
+            return one
+        return _pick(one, rounds(allow_wrap=True), r, glyph_h, align)
+    return rounds(allow_wrap=True)
 
 
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
@@ -1313,35 +1445,59 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
             hi = max(floor_pt, min(want_size, legacy_size))
             lo = floor_pt
 
-        # 第一轮：站在原地不动。
+        # 离图框留一个安全边距。贴着框线写，虽然没越界，客户看到的是
+        # 「这块快要出格子了」—— 第 1 页右侧那个视图标题正是这么撞上去的。
+        #
+        # 只收左右，不动上下：这份图纸的视图标题本来就贴着图框上沿排，
+        # 上下也按一个字高收进去，等于把三条标题全判成越界，
+        # 一路退到可读下限（实测字号从 19.1 掉到 17.2，正好一成）。
+        safe = None
+        try:
+            safe = space.inset(glyph_h * typography.FRAME_PAD_EM, pad_y=0.0)
+        except Exception:
+            safe = None
+        # 原件里对着图形居中的标题（视图标题、图名）：长法要绕重心对称长，
+        # 不能像标注那样一头固定往另一头伸。判据见 _assign_align。
+        align = c.get("align") or "left"
         widen = glyph_h * typography.WIDEN_BUDGET
         budget = (glyph_h * typography.MOVE_BUDGET
                   if max_shift is None else max_shift)
-        best = _best_size(space, r, font, out, lo, hi, 0.0, 0.0, fill)
-        # 第二轮：只允许沿基线加宽，不许换行。英文普遍比中文长，加宽是最
-        # 不破坏观感的一种让步 —— 还在同一行、同一个起点，只是伸出去一点。
-        # v1.1.5 把加宽和上下挪位合用一个 1.5 字高预算，砍成 0.8 之后连
-        # 加宽都做不到了，一页标题只好各自缩字号，反而回到「同类大小不一」。
+        # 标题旁边要留净空（0.35 字高），标注不用：
+        # 净空是拿「探针外扩」实现的，而探针还得先把自己的笔画让开 ——
+        # 所以忽略区要按 fill 再放宽一点点，否则标题自己的抗锯齿边缘
+        # 会被算成障碍，连原位都判「放不下」。
+        if align == "center":
+            pad = glyph_h * typography.TITLE_CLEAR_EM
+            own = pymupdf.Rect(fill.x0 - 1.2, fill.y0 - 1.2,
+                               fill.x1 + 1.2, fill.y1 + 1.2)
+        else:
+            pad, own = None, fill
+
+        best = _search(space, r, font, out, lo, hi, glyph_h, align,
+                       safe, widen, budget, ignore=own, pad=pad)
+        # 安全边距是「好看」的要求，字号是「看得清」的要求，两件事撞车时
+        # 先让好看那一步 —— 让步的代价只可能是「贴着框线写」，绝不能是
+        # 「这一条干脆缩小一号」。只有真的没到类字号才去试。
         if best is None or best[0] < hi * typography.CLASS_FLOOR:
-            grew = _best_size(space, r, font, out, lo, hi, widen, 0.0, fill)
-            if grew is not None and (best is None or grew[0] > best[0]):
-                best = grew
-        # 第三轮：才允许上下挪一行。挪位是最后手段 —— 一挪就不再和原来那条
-        # 标注挨着，看着像另一个信息点（客户截图里 Yellow part 那条）。
-        if best is None or best[0] < hi * typography.CLASS_FLOOR:
-            moved = _best_size(space, r, font, out, lo, hi, widen, budget, fill)
-            if moved is not None and (best is None or moved[0] > best[0]):
-                best = moved
+            best = _pick(best, _search(space, r, font, out, lo, hi, glyph_h,
+                                       align, None, widen, budget,
+                                       ignore=own, pad=pad),
+                         r, glyph_h, align)
         # 还是放不下：放开类字号约束，一路缩到可读下限，能写就写。
         # 留中文比偏小更难解释，但偏小要被记下来（第七项 small）。
         #
         # 注意要一直探到 floor_pt，不能只降个八成就算了 —— 类字号 10pt 的
         # 标注按 0.8 停在 7.2pt，而它其实 5.6pt 就写得下，等于白白留中文。
+        #
+        # 这一轮把两重让步都打开：安全边距放开（贴边也比留英文强）、
+        # 居中退回一头固定（重心偏了也比留英文强）。
         if best is None:
+            drift = glyph_h * typography.CENTER_DRIFT_EM
             for k in range(7):
                 probe = lo + (floor_pt - lo) * k / 6.0
                 got = _place_for_size(space, r, font, out, probe, widen, budget,
-                                      ignore=fill)
+                                      ignore=fill, align=align, drift=drift,
+                                      safe=None, anchor_fallback=True)
                 if got is not None:
                     best = (probe, got[0], got[1])
                     break
@@ -1406,6 +1562,110 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     return (c, out, fill, size, font, lines, size < soft, r)
 
 
+def _content_center(rects, r, ink, space=None):
+    """
+    这条文字所标注的那块图形，横向中心在哪。找不到返回 None。
+
+    做法：在文字**正下方**一带里，把横向落在搜索窗口内的图元求并集，
+    取并集的中心。为什么是正下方 —— 视图标题、图名都是放在图形上方的，
+    它对着的那块图形就是自己的注释对象；图形中心 = 标题该对齐的中线。
+
+    三道过滤缺一不可：
+      · 纵向从「紧贴下方」开始，找不到再一层层放宽（3 → 6 → 10 → 14 个字高）。
+        为什么不能一上来就用大范围：第 2 页右上那个标题下面先经过视图，
+        再往下 250pt 就是标题栏，一次性圈 14 个字高会把标题栏并进来，
+        中心被拽到 630（真值是 589），于是把本来居中的标题判成「不居中」。
+        而一上来就只看 3 个字高又可能什么都圈不到（视图离标题很远时），
+        所以逐层放宽，第一个像样的就收手 —— 离得最近的那块才是它标的。
+      · 横向只收与「标题框左右各扩一个字宽」相交的图元。图纸上两个视图
+        并列（实测相距 200pt），不过滤就会把隔壁那个也算进来。
+      · 并集明显比标题还窄（不到 1.3 倍）就算不上「标题标注的图形」，
+        多半是下面还有一行字，这种继续放宽再看。
+
+    图形是位图（转曲、贴图）时矢量图元一条都拿不到，退回问占用图
+    「这一带哪儿有东西」—— 粗一档，但中心够用。
+    """
+    for band_em in (3.0, 6.0, 10.0, typography.CENTER_REF_BAND_EM):
+        band_top = r.y1 + ink * 0.2
+        band_bot = r.y1 + ink * band_em
+        win = pymupdf.Rect(r.x0 - r.width, band_top, r.x1 + r.width, band_bot)
+
+        u = None
+        for x in rects:
+            if x.y0 < band_top or x.y0 > band_bot:
+                continue
+            if x.x1 <= win.x0 or x.x0 >= win.x1:
+                continue
+            u = x if u is None else (u | x)
+        if u is not None and u.width >= r.width * 1.3:
+            return (u.x0 + u.x1) / 2.0
+
+        if space is not None and band_em == typography.CENTER_REF_BAND_EM:
+            # 最后一层还没有矢量图元：可能是位图图形，问占用图
+            try:
+                span = space.occupied_span(win)
+            except Exception:
+                span = None
+            if span is not None and span.width >= r.width * 1.3:
+                return (span.x0 + span.x1) / 2.0
+    return None
+
+
+def _assign_align(page, candidates, space=None):
+    """
+    标出哪些文字是「对着图形居中」的，供 _candidates 决定往哪边长。
+
+    为什么非要先判这一步：译文比原文长是常态（外表正面图五个字 →
+    Exterior Front View 十八个字符，长度翻一倍）。只有「左端固定」和
+    「右端固定」两种长法时，重心必然被推走一半增量 —— 实测第 2 页四个
+    视图标题的重心全部右移 40~45pt，客户看到的就是「标题偏到一边」；
+    第 1 页右边那个更糟，一路顶到图框线上。
+
+    两道关，都要过：
+
+    1. 字号得是这一页最大的那一档（不低于最大字高的 85%）。
+       居中是**标题的排版属性**，标注不是 —— 图纸上的标注靠引线定位，
+       习惯齐左排成一列。这一关是实测撞出来的：第 1 页左边那一列标注
+       （外框50*50*2.5mm、蓝色部分、灰色部分…）正好排在视图中线上，
+       几何上「看着居中」全被判成居中，于是译文两头一起长，
+       整列标注的左边缘散掉了。加上字号这一关就干净了 ——
+       标题 18~19pt、标注 9.7~11pt，中间空得很宽。
+
+    2. 原框中心与所标注图形的中心相差半个字高以内。这份图纸五个视图
+       标题的偏差都在 0.6pt 以内，很硬。
+
+    认不出图形（下面没有图元、也没有位图内容）就不设 align，
+    沿用原来的左对齐处理：宁可不动，也不要猜错方向。
+    """
+    ink_of = {}
+    for c in candidates:
+        if c.get("vertical"):
+            continue
+        ink = c.get("ink_h") or c["rect"].height * 0.72
+        if ink > 0:
+            ink_of[id(c)] = ink
+    if not ink_of:
+        return
+    top_ink = max(ink_of.values())
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return
+    rects = [dr["rect"] for dr in drawings
+             if dr["rect"].width > 1 and dr["rect"].height > 1]
+    for c in candidates:
+        ink = ink_of.get(id(c))
+        if not ink or ink < top_ink * typography.CENTER_MIN_REL:
+            continue
+        r = c["rect"]
+        center = _content_center(rects, r, ink, space)
+        if center is None:
+            continue
+        tol = max(ink * typography.CENTER_TOL_EM, 3.0)
+        if abs((r.x0 + r.x1) / 2.0 - center) <= tol:
+            c["align"] = "center"
+
+
 def _align_class_sizes(plans):
     """
     把同一类里已经定稿的字号拉齐到同一个值。
@@ -1442,7 +1702,14 @@ def _align_class_sizes(plans):
             c, out, fill, _size, font, lines, small, place = p
             width = max(font.text_length(seg, fontsize=target)
                         for seg in (lines or [out]))
-            box = _box_from(place.x0,
+            # 缩字号时往哪边收：居中的绕原重心收（两头各收一点），
+            # 靠左的保持左端不动。这条不能省 —— 一缩字号就往右收，
+            # 本来居中的标题又被推出去了几毫米，等于白做一次居中。
+            if c.get("align") == "center":
+                x0 = (place.x0 + place.x1) / 2.0 - width / 2.0
+            else:
+                x0 = place.x0
+            box = _box_from(x0,
                             place.y1 - target * typography.DESCENDER,
                             target, width, len(lines) if lines else 1)
             members[idx] = (c, out, fill, target, font, lines, small, box)

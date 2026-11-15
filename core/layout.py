@@ -176,7 +176,7 @@ class PageSpace:
             area = int(full)
         return max(0, n) / float(area)
 
-    def is_clear(self, rect, ignore=None, pad=EXTRA_CLEAR):
+    def is_clear(self, rect, ignore=None, pad=EXTRA_CLEAR, safe=None):
         """
         这块能不能放下东西。
 
@@ -184,14 +184,67 @@ class PageSpace:
         ignore 见 occupied_ratio：只该传「本条自己的原框」。
         传别人的框进来就有害了 —— 那条标注会以为这块没人要，
         把自己的译文挪进去，两条标注换位置，图上就乱了。
+
+        safe：比图框再收一圈的「安全区」。文字贴着框线写，虽然没越界，
+        视觉上就是快要出格（客户原话）。真放不下时调用方会传 None 把它放开，
+        不能因为怕贴边就把整条留成原文。
         """
         if not self.frame.contains(rect):
+            return False
+        if safe is not None and not safe.is_empty and not safe.contains(rect):
             return False
         probe = pymupdf.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
         for rv in self._reserved:
             if probe.intersects(rv):
                 return False
         return self.occupied_ratio(probe, ignore=ignore) <= CLEAR_TOL
+
+    def inset(self, pad, pad_y=None):
+        """
+        图框往里收一圈，得到「安全区」。
+
+        pad_y 单独给上下留白的量，默认与左右相同。文字离框线太近之所以难看，
+        主要是左右两侧（译文比原文长，往两边长出去顶到框线）；上下方向
+        图纸本来就是「标题紧贴图框上沿」的排法，按一个字高收进去会把
+        所有视图标题判成越界 —— 实测第 1 页三个标题因此全部缩了一成字号。
+        所以调用方可以只收左右，上下不动。
+
+        收完是空的（图框本身就比两倍 pad 还小）就返回空矩形，
+        调用方据此知道这条约束形同虚设，别再拿它当门槛。
+        """
+        f = self.frame
+        pad = float(pad or 0.0)
+        pad_y = pad if pad_y is None else float(pad_y)
+        if f.width <= pad * 2 + 1 or f.height <= pad_y * 2 + 1:
+            return pymupdf.Rect()
+        return pymupdf.Rect(f.x0 + pad, f.y0 + pad_y, f.x1 - pad, f.y1 - pad_y)
+
+    def occupied_span(self, window):
+        """
+        window 这个窗口里，有内容的那部分横向范围（PDF 坐标）。没内容返回 None。
+
+        给「标题对着哪块图形居中」这个判断兜底用：图形是位图（不是矢量）时，
+        get_drawings() 一条都拿不到，只能问占用图「这一带哪儿有东西」。
+        取的是窗口内所有占用像素的外接范围，比逐个图元求并集粗，
+        但判断「中心在哪」够用。
+        """
+        if self._dirty:
+            self._sat_build()
+        x0, x1, y0, y1 = self._px(window)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        cols = self._occ[y0:y1, x0:x1].any(axis=0)
+        idx = cols.nonzero()[0]
+        if len(idx) == 0:
+            return None
+        rows = self._occ[y0:y1, x0:x1].any(axis=1)
+        ridx = rows.nonzero()[0]
+        sx, sy = self.scale, self.scale
+        return pymupdf.Rect(
+            self._origin[0] + (x0 + float(idx[0])) / sx,
+            self._origin[1] + (y0 + float(ridx[0])) / sy,
+            self._origin[0] + (x0 + float(idx[-1]) + 1) / sx,
+            self._origin[1] + (y0 + float(ridx[-1]) + 1) / sy)
 
     def clear_width(self, rect, limit, step=0.0):
         """从 rect.x0 往右，最多能延伸到多少宽度（含 rcet 自身的可写部分）"""

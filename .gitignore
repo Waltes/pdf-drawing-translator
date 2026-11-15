@@ -67,3 +67,9 @@ _cmp_*.pdf
 _e2e.py
 _v1*.png
 _cmp_*.pdf
+
+# 合成检查与调试脚本的产物
+_synth/
+_dbg*
+_fix_new*
+_zoom_*.png

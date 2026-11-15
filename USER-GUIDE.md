@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.6
+Version 1.1.7
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.6.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.7.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -895,7 +895,40 @@ stops pointing at the part it describes, and moving a callout is a drawing chang
 layout fix. When no position inside that budget works, the label is left in the original
 language and listed — a gap the reader can see beats text printed over a neighbour.
 
-### 9.7 What happens when the translation is longer
+### 9.7 A centred heading has to stay centred
+
+View titles (`框架正面图`, `外表侧面图` and the like) are centred over their drawing, not
+left-aligned. Translations are typically twice the length of the original — five Chinese
+characters become eighteen Latin ones — and the layout used to have only two ways to grow:
+pin the left edge and grow right, or pin the right edge and grow left. Neither is what the
+original drawing meant: the centre is pushed out by half the added width. Measured on four
+view titles, the centre moved 40–45 pt to the right (the view axis sits at 247, the title
+ended up at 292); the one on the right ran until only 14 pt was left to the page border —
+exactly the "off to one side" and "almost out of the box" the client reported.
+
+Three steps now:
+
+| Step | Action | Detail |
+|---|---|---|
+| 1 | Recognise that the line was centred | The centre of the original box is within half a character height of the centre of the graphic it labels, and its size must be in the largest band on the page |
+| 2 | Grow symmetrically about the centre | Half the added width on each side, the centre stays put, and one character height of clearance is kept from the border |
+| 3 | Give way only when blocked | First allow half a character height of centre shift, then shrink the size (by no more than a tenth), and only then fall back to pinning one edge |
+
+Why step 1 checks the font size: drawing sheets often carry a column of labels
+(`Outer frame 50*50*2.5mm`, `Blue parts`, `Grey parts`…) sitting on the view axis. Geometry
+alone would call every one of them centred, and growing them on both sides would break up the
+column's left edge. Titles run 18–19 pt, labels 9.7–11 pt, so size separates them cleanly.
+
+The trade-off in step 2, stated plainly: a heading a tenth smaller is invisible to a reader;
+a heading half a character height off the view axis is obvious. Size gives way before the
+centre does — but only by that tenth. Beyond it the line is better left in the original
+language and reported.
+
+Headings also hold two extra rules: one size for all of them on a page (see 9.8), and as far
+as possible no wrapping (two headings on one line and a third in two lines looks worse than
+everything a tenth smaller).
+
+### 9.8 What happens when the translation is longer
 
 The same meaning runs 1.6–2.8× longer in English than in Chinese: a Chinese character is one
 em wide, a Latin letter roughly half. The box was sized for the Chinese text, so the English
@@ -995,7 +1028,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.6.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.7.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 
