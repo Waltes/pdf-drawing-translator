@@ -1293,7 +1293,11 @@ def _search(space, r, font, out, lo, hi, glyph_h, align, safe,
         best = _best_size(space, r, font, out, lo, hi, 0.0, 0.0,
                           align=align, safe=safe, anchor_fallback=False,
                           allow_wrap=allow_wrap, pad=pad, ignore=ignore)
-        if best is None or best[0] < hi * typography.CLASS_FLOOR:
+        # 居中的标题：加宽这一轮**必须**走，不能因为「原地已经够九成」就收手。
+        # 实测第 2 页那个俯视图标题，原地正好能放到 17.42（够九成，够停），
+        # 于是加宽那一轮没跑，整页四个标题跟着掉到 17.42 —— 而对称加宽明明
+        # 能放到 19.09。标题的长度本来就该随图形铺开，这一轮对它没有代价。
+        if align == "center" or best is None or best[0] < hi * typography.CLASS_FLOOR:
             best = _pick(best, _best_size(space, r, font, out, lo, hi,
                                           widen, 0.0, align=align,
                                           safe=safe, anchor_fallback=False,
