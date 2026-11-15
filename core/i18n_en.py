@@ -76,6 +76,8 @@ EN = {
     "居中标题译文变长后重心不动": "centred title keeps its centre when the text grows",
     "居中标题不贴着图框写": "centred title keeps clear of the border",
     "不居中的标注仍靠左写": "left-aligned labels stay left-aligned",
+    "OCR 丢掉的直径符号能从字形找回来": "diameter symbol lost by OCR is recovered from the glyph shape",
+    "数字与百分号不被当成直径符号": "digits and percent signs are not mistaken for a diameter symbol",
     "坏符号的尺寸标注不会被重画":
         "a dimension label with a damaged symbol is left untouched",
     "整数尺寸不再补两位小数": "whole-number dimensions keep no trailing zeros",

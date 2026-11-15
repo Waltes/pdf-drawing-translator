@@ -3602,6 +3602,59 @@ def _selftest():
         check(T("居中标题不贴着图框写"), False, f"{type(exc).__name__}: {exc}")
         check(T("不居中的标注仍靠左写"), False, f"{type(exc).__name__}: {exc}")
 
+    # 工程符号：OCR 读不出直径符号（实测整页 300dpi 直接丢弃、800dpi 读成 0），
+    # 只能从字形结构上认 —— 圆环被斜线分成两个洞。
+    # 这里造一张样张，正例必须认出来，反例（数字 8、百分号、汉字「日」）一个都不许认。
+    try:
+        from core import image_text as _it3
+        from core import glyphs as _gl
+
+        if not _it3.ocr_available():
+            check(T("OCR 丢掉的直径符号能从字形找回来"), True, "OCR 组件未安装，跳过")
+            check(T("数字与百分号不被当成直径符号"), True, "OCR 组件未安装，跳过")
+        else:
+            _np3 = _it3._numpy()
+            doc2 = pymupdf.open()
+            page2 = doc2.new_page(width=320, height=260)
+            _rows = [("ø12mm", "12mm", True), ("Ø50", "50", True),
+                     ("25mm", "25mm", False), ("8mm", "8mm", False),
+                     ("100%", "100%", False), ("日", "日", False)]
+            _boxes, _yy = [], 30
+            for _src, _ocr, _want in _rows:
+                _fn = "china-s" if _src == "日" else "helv"
+                page2.insert_text((20, _yy), _src, fontsize=16,
+                                  color=(0.5, 0.5, 0.5), fontname=_fn)
+                _boxes.append((pymupdf.Rect(16, _yy - 18, 110, _yy + 6),
+                               _ocr, _want, _src))
+                _yy += 34
+            _pix3 = page2.get_pixmap(matrix=pymupdf.Matrix(3, 3))
+            _arr = _np3.frombuffer(_pix3.samples, dtype=_np3.uint8).reshape(
+                _pix3.height, _pix3.width, _pix3.n)
+            _rgb = (_arr[:, :, :3] if _pix3.n >= 3
+                    else _np3.repeat(_arr[:, :, :1], 3, axis=2)).astype(int)
+
+            _hit, _miss, _false = [], [], []
+            for _rect, _ocr, _want, _src in _boxes:
+                _new, _added = _gl.complete_symbols(
+                    page2, page2.rect, _rect, 3, _ocr, rgb=_rgb)
+                _got = ("ø" in _new) or ("Ø" in _new)
+                if _want and _got:
+                    _hit.append(_src)
+                elif _want:
+                    _miss.append(f"{_src}→{_new}")
+                elif _got:
+                    _false.append(f"{_src}→{_new}")
+            check(T("OCR 丢掉的直径符号能从字形找回来"),
+                  not _miss, "认出=%s 漏掉=%s" % (_hit, _miss or "无"))
+            check(T("数字与百分号不被当成直径符号"),
+                  not _false, "误认=%s" % (_false or "无"))
+            doc2.close()
+    except Exception as exc:
+        check(T("OCR 丢掉的直径符号能从字形找回来"), False,
+              f"{type(exc).__name__}: {exc}")
+        check(T("数字与百分号不被当成直径符号"), False,
+              f"{type(exc).__name__}: {exc}")
+
     # 纯尺寸标注必须原样留着，不许被"重画"一遍。
     #
     # 客户报的病症是「ø 符号被翻译成了 @」。链条有三段：

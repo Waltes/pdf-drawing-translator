@@ -32,6 +32,9 @@ from . import textfit
 # 字号反算与标点规范也共用一套（core/typography.py）：
 # 文字层和位图层写字的方式不同，但「写出来该多大、该有哪些空格」是同一件事。
 from . import typography
+# 工程符号的图形检测（core/glyphs.py）。OCR 读不出来的 ø，
+# 只能靠字形结构从图像里找回来，这条链独立成模块便于单独测。
+from . import glyphs
 
 # OCR 组件与 numpy 都改成惰性加载（首次真正要用图像模式时才导入）。
 #
@@ -896,6 +899,16 @@ def process_page_images(page, translate_fn, used_rects, report,
             # 实测墨迹高度与水平范围：字号要跟原字一样高就得知道原字多高，
             # 填充框要只盖字本身就得知道笔画到哪儿为止
             _ink = _measure_ink_h(rgb, clip, txt_rect, zoom)
+            # OCR 会把直径符号整个吞掉：整页 300dpi 读成「流水孔12mm」，
+            # 800dpi 读成「流水孔012mm」，切出单字送识别直接给空。
+            # 翻译模型是可靠的（给它 ø 就原样保留，不给也不凭空补），
+            # 所以缺口只能在读字这一端补 —— 从字形结构上把符号找回来。
+            if not vertical:
+                fixed, added = glyphs.complete_symbols(
+                    page, clip, txt_rect, zoom, text, rgb=rgb)
+                if added and fixed != text:
+                    text = fixed
+                    hint = ocr_lang(text)
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
                                "fg": fg, "hint": hint, "vertical": vertical,
                                "ink_h": _ink[0], "ink_box": _ink[1]})
@@ -1266,6 +1279,9 @@ def _pick(cur, cand, r, ink, align):
 
     def worth(p):
         size, box = p[0], p[1]
+        # 折行要打折：单行只让一成字号就该守住单行，理由见 typography.WRAP_COST
+        if p[2] is not None and len(p[2]) > 1:
+            size *= typography.WRAP_COST
         if align != "center" or ink <= 0:
             return size
         off = abs((box.x0 + box.x1) / 2.0 - (r.x0 + r.x1) / 2.0) / ink
@@ -1302,7 +1318,14 @@ def _search(space, r, font, out, lo, hi, glyph_h, align, safe,
         # 实测第 2 页那个俯视图标题，原地正好能放到 17.42（够九成，够停），
         # 于是加宽那一轮没跑，整页四个标题跟着掉到 17.42 —— 而对称加宽明明
         # 能放到 19.09。标题的长度本来就该随图形铺开，这一轮对它没有代价。
-        if align == "center" or best is None or best[0] < hi * typography.CLASS_FLOOR:
+        #
+        # 第一轮交了折行结果的也要走：原地能塞下两行，不代表一行不行。
+        # 实测「流水孔 ø12mm」原地折成两行能放到 12.51（够九成，于是收手），
+        # 而沿基线加宽其实一行就能放到 12.19 —— 差 2.5% 的字号，
+        # 却把原本一行的标注拆成两行，还压到下面那条 Red part 上。
+        if (align == "center" or best is None
+                or best[0] < hi * typography.CLASS_FLOOR
+                or (best[2] is not None and len(best[2]) > 1)):
             best = _pick(best, _best_size(space, r, font, out, lo, hi,
                                           widen, 0.0, align=align,
                                           safe=safe, anchor_fallback=False,

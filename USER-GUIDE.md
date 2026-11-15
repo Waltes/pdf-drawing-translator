@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.8
+Version 1.1.9
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.8.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.9.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -987,6 +987,59 @@ One related fix: `ø` (lowercase o-slash) is now recognised as a diameter marker
 `Ø`, `⌀`, `φ` and `Φ`. Only the latter four were recognised before, yet lowercase `ø` is the
 most common form on real drawings.
 
+### 9.10 A symbol the reader cannot see is recovered from its shape
+
+9.9 protects labels that should not be touched. But the label that *does* need translating —
+`流水孔 ø12mm` → `Weep hole ø12mm` — had a different problem: the symbol was already gone
+before translation started.
+
+This one is not on the translation side, it is on the reading side. The same `ø`, tried several
+ways:
+
+| How it was read | Result |
+|---|---|
+| Whole page at 300 dpi | `流水孔12mm` — the symbol is dropped without a trace |
+| Whole page at 800 dpi | `流水孔012mm` — read as the digit 0 |
+| Cropped single glyph | empty result; with a neighbour attached, `01` |
+
+The symbol is effectively absent from the recognition model's vocabulary; resolution and
+pre-processing do not recover it.
+
+The translation model itself is reliable — give it `ø` and it keeps it, leave it out and it does
+not invent one:
+
+```
+流水孔ø12mm  →  Weep hole ø12mm
+流水孔12mm   →  Weep hole 12mm      ← not in the source, so the model does not guess
+流水孔@12mm  →  Weep hole @12mm     ← a misread character is copied verbatim
+```
+
+So the gap can only be closed on the reading side. The tool now **skips recognition and looks at
+the shape**: a diameter symbol is a closed ring split in two by a diagonal stroke, which gives
+three properties nothing else in a drawing font has — **two holes** inside (digit 0 and letter o
+have one), a **diagonal** line between the two hole centroids (`θ` and `8` are vertical, `φ` and
+`%` are horizontal), and an overall height of only 60–80% of the digits (it is a lowercase
+letter, occupying just the x-height).
+
+The test runs at 8× magnification: at low resolution the stroke is two or three pixels wide and
+a closed-morphology pass fills the letter in, destroying the holes, whereas between 6× and 12×
+the hole count and angle are stable.
+
+The recovered symbol is inserted back by position: the glyph cluster has an x coordinate, and
+laying the line's text out by character width shows which character it sits closest to. It is
+only inserted when that character is a digit or a letter — if it lands on a Chinese character the
+alignment estimate was off, and the tool prefers to leave it alone.
+
+Two hard rules:
+
+- **Only this one symbol is recognised.** `°`, `±`, `×` and `□` have far weaker shape signatures,
+  and guessing at them damages digits. Misreading one symbol means machining the wrong hole, so
+  the tool would rather not fill it in.
+- **When in doubt, stay out.** The digit `8`, `%`, and the characters 「日」「回」「四」 are never
+  taken for a diameter. An uppercase `Ø` is restored as `Ø` and a lowercase `ø` as `ø`; the
+  case is never silently changed.
+
+
 Digits that carry meaning are never touched: tolerances (`±0.50`), radii (`R0.50`), threads
 (`M8×1.25`), thousands separators (`1,000`), and values produced by unit conversion (`4"`
 converted to `101.60mm`, where the zero means precision to 0.01).
@@ -1061,7 +1114,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.8.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.9.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 
