@@ -73,3 +73,9 @@ _synth/
 _dbg*
 _fix_new*
 _zoom_*.png
+
+# 端到端验证产物
+_*.pdf
+_*.png
+_*.log
+_*.pkl
