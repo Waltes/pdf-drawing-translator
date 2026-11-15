@@ -82,3 +82,7 @@ _*.pkl
 
 # 临时验证脚本（_t_ 前缀，用完删）
 _t_*.py
+
+# 打包中间产物（由 packaging/build_edition.py 生成）
+packaging/edition_defs.iss
+packaging/_version_info_build.txt

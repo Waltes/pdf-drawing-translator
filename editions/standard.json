@@ -1,0 +1,17 @@
+{
+  "_说明": "通用版。版本号与 packaging/installer.iss 里的 AppVer 保持一致。",
+  "id": "standard",
+  "name_zh": "PDF 图纸翻译",
+  "name_en": "PDF Drawing Translator",
+  "version": "1.1.10",
+  "data_dir": "PDFDrawingTranslator",
+  "exe_name": "PDF图纸翻译",
+  "app_id_guid": "{E07108F2-9CFA-4C91-A748-948BDE9016E8}",
+  "output_prefix": "PDFTranslator_Setup",
+  "glossary": "",
+  "fixes": "",
+  "default_dst": "auto",
+  "industry": "",
+  "industry_en": "",
+  "guide": "使用说明.md"
+}

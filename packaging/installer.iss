@@ -27,27 +27,37 @@
 ;     早先只写了几十条自定义消息，没写的会自动落回英文，结果向导中英混杂 ——
 ;     标准消息有两百多条，漏一条就是一句英文冒出来，所以改成整份官方翻译打底。
 ;     重新生成：python packaging/merge_zh_isl.py
+;  5) 品牌/版本/安装目录全部来自 edition_defs.iss
+;     这个文件由 packaging\build_edition.py 按 editions\<id>.json 生成，
+;     里面就是几行 #define。不要在本文件里写死任何品牌名 ——
+;     通用版和定制版的差别只有这几行，写死等于要把整个脚本复制一份。
+;     手工编译前先跑一次：
+;         python packaging\build_edition.py --defs-only
+;     （不带参数就是当前 edition.json 那一版）
 ; ============================================================================
 
-#define AppName "PDF 图纸翻译"
-#define AppNameEn "PDF Drawing Translator"
-#define AppVer "1.1.10"
-#define AppExe "PDF图纸翻译.exe"
-#define AppPublisher "Walter"
+#include "edition_defs.iss"
 
 [Setup]
-AppId={{E07108F2-9CFA-4C91-A748-948BDE9016E8}
+; AppId 两版必须不同：相同的话装定制版会顶掉通用版，卸载时也会连带删掉
+; 对方的安装目录 —— 客户那边两版都装着时这是灾难。
+AppId={#AppIdGuid}
 ; AppName 只能有一个，这里是双语的：英文用户看得出这是什么，中文用户认得出来。
-; 安装目录名用纯 ASCII 的 DrawingTranslator，避免中文路径给解压/杀软添麻烦。
-AppName={#AppName} (PDF Drawing Translator)
+; 安装目录名用纯 ASCII，避免中文路径给解压/杀软添麻烦。
+AppName={#AppName} ({#AppNameEn})
 AppVersion={#AppVer}
 AppVerName={#AppName} {#AppVer}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\PDFDrawingTranslator
+; 不写这一行的话，安装包右键属性的文件版本会显示 "X"，看着像来路不明的程序
+VersionInfoVersion={#AppVer4}
+VersionInfoProductName={#AppName}
+VersionInfoDescription={#AppName} 安装程序
+VersionInfoCompany={#AppPublisher}
+DefaultDirName={autopf}\{#InstallDirName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=output
-OutputBaseFilename=PDFTranslator_Setup_{#AppVer}
+OutputBaseFilename={#OutputBase}_{#AppVer}
 SetupIconFile=..\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2/max
@@ -87,10 +97,16 @@ zh.KeepDataTitle=卸载
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalTasks}"
 
 [Files]
-Source: "..\dist\PDF图纸翻译\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; 两版说明都放进安装目录：程序本身是中英双语，用户可能想换一版看
-Source: "..\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#AppExeName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 说明文档按发行版选。通用版放中英两份；定制版放自己那份（只讲差异），
+; 另外把通用说明改名成「（通用版）」一起放进去当详细参考 ——
+; 定制版说明没打算把一千行功能细节复制一遍，那份一改就要同步两处。
+Source: "..\{#GuideFile}"; DestDir: "{app}"; DestName: "使用说明.md"; Flags: ignoreversion
+#ifdef ExtraGuide
+Source: "..\使用说明.md"; DestDir: "{app}"; DestName: "使用说明（通用版）.md"; Flags: ignoreversion
+#else
 Source: "..\USER-GUIDE.md"; DestDir: "{app}"; DestName: "User Guide (EN).md"; Flags: ignoreversion
+#endif
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\samples\*.pdf"; DestDir: "{app}\{cm:SamplesFolder}"; Flags: ignoreversion
 
@@ -132,8 +148,8 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    Src := ExpandConstant('{userappdata}\PDFDrawingTranslator\data\config.json');
-    Bak := ExpandConstant('{userappdata}\PDFDrawingTranslator\config.bak.json');
+    Src := ExpandConstant('{userappdata}\{#DataDirName}\data\config.json');
+    Bak := ExpandConstant('{userappdata}\{#DataDirName}\config.bak.json');
     if FileExists(Src) then
     begin
       ForceDirectories(ExtractFileDir(Bak));
@@ -152,10 +168,13 @@ end;
 // 同级的 apikey.dat（加密保存的 API key）和 config.bak.json（安装前备份）
 // 必须留着，否则用户装回来还得重新申请 key —— 而多数人填完 key 就没留底。
 //
-// 要问两个目录：一个是现在的 %APPDATA%\PDFDrawingTranslator，
+// 要问两个目录：一个是现在的 %APPDATA%\<本版数据目录>，
 // 一个是老版本的 %APPDATA%\PDF图纸翻译。程序启动时会把老的搬进新的，
 // 但搬不动（文件被占用、权限不足）时老目录还留在原地，卸载不能把它落下。
 // 老目录没有 key 独立存储这套结构，整个删掉是对的。
+//
+// 老目录只有通用版才有。定制版不查它：同一台机器上可能装过通用版，
+// 定制版卸载时去问「要不要删通用版的旧数据」属于越界 —— 那是别人的东西。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir, DataSub, LegacyDir, Targets: String;
@@ -163,9 +182,12 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    DataDir := ExpandConstant('{userappdata}\PDFDrawingTranslator');
+    DataDir := ExpandConstant('{userappdata}\{#DataDirName}');
     DataSub := DataDir + '\data';
+    LegacyDir := '';
+#ifdef CheckLegacyDir
     LegacyDir := ExpandConstant('{userappdata}\PDF图纸翻译');
+#endif
     Targets := '';
     Found := False;
     if DirExists(DataSub) then
@@ -173,7 +195,7 @@ begin
       Targets := DataSub;
       Found := True;
     end;
-    if DirExists(LegacyDir) then
+    if (LegacyDir <> '') and DirExists(LegacyDir) then
     begin
       if Found then
         Targets := Targets + #13#10 + LegacyDir
@@ -188,7 +210,7 @@ begin
       begin
         if DirExists(DataSub) then
           DelTree(DataSub, True, True, True);
-        if DirExists(LegacyDir) then
+        if (LegacyDir <> '') and DirExists(LegacyDir) then
           DelTree(LegacyDir, True, True, True);
       end;
     end;

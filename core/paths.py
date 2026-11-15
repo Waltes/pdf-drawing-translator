@@ -20,6 +20,8 @@ import os
 import shutil
 import sys
 
+from . import edition
+
 # 用户数据目录名，用纯 ASCII。
 #
 # 1.0.0 之前叫「PDF图纸翻译」，跟开始菜单里的名字一致，看着亲切。但它有个
@@ -28,12 +30,20 @@ import sys
 # 而 README 里抄路径的人，只要输入法差一点就打不开。
 # 名字统一成 ASCII 之后，文档里那句 %APPDATA%\PDFDrawingTranslator\data
 # 谁都能一字不差地敲出来。
-DATA_DIR_NAME = "PDFDrawingTranslator"
+#
+# 定制版用另一个目录名（见 editions/dynamic.json）。两版装在同一台机器上时
+# 绝不共用目录：共用意味着缓存互相覆盖、术语库互相污染 —— 客户改了自己的
+# 词表，通用版那边的结果也跟着变，两边都没法排查。
+DATA_DIR_NAME = edition.data_dir_name()
 
 # 老版本用过的目录名。升级时要把里面的东西搬过来 ——
 # 不搬的话用户装完新版，API key、术语库、两万条翻译缓存全都「没了」，
 # 在他看来就是这版更新把他的配置删了。
-LEGACY_DIR_NAMES = ("PDF图纸翻译",)
+#
+# 定制版不继承通用版的数据目录：那个目录里的缓存是按通用词库算出来的，
+# 搬过去反而让客户拿到一批「旧词库翻译的结果」。定制版是全新交付，
+# 没有需要继承的历史数据。
+LEGACY_DIR_NAMES = () if edition.is_custom() else ("PDF图纸翻译",)
 
 FROZEN = bool(getattr(sys, "frozen", False))
 
@@ -162,7 +172,15 @@ SAMPLE_DIR = os.path.join(RES_DIR, "sample")
 # 首次运行时从资源目录复制到数据目录的种子文件。
 # 都是「程序自带的默认内容」，复制过去之后用户可以照着改（术语库就是要能改的）。
 # 已经存在就绝不覆盖 —— 用户辛苦加的术语不能被一次升级抹掉。
+#
+# 定制版的专属词库也要铺过去：它是客户自己的锁标词表，客户有权在软件里
+# 看见并修改。留在程序目录里（打包后是 _internal，用户找不到）等于把
+# 客户最关心的那份东西藏起来了。
 SEED_FILES = ("glossary.csv", "fixes.csv", "done.wav", "prices.json")
+if edition.extra_glossary():
+    SEED_FILES += (edition.extra_glossary(),)
+if edition.extra_fixes():
+    SEED_FILES += (edition.extra_fixes(),)
 
 
 def ensure_seed_files():

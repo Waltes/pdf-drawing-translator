@@ -110,9 +110,25 @@ def _popup(title, msg):
             pass
 
 
+def _boot_title():
+    """
+    启动早期用的软件名。
+
+    这条路跑在 core 还没导入成功的时候（正是它失败才走到这里），
+    所以不能依赖 app_title() 那些已经导入好的模块。core.edition 只依赖
+    标准库，正常情况下仍能导入；导不进来就退回通用版名字 ——
+    这个对话框的作用是告诉用户「为什么打不开」，名字准不准是次要的。
+    """
+    try:
+        from core import edition
+        return edition.name(False)
+    except Exception:
+        return "PDF 图纸翻译"
+
+
 def _fatal(msg):
     _log_crash(*sys.exc_info())
-    _popup(_tr("PDF 图纸翻译 · 启动失败"),
+    _popup(_boot_title() + _tr(" · 启动失败"),
            msg + "\n\n" + _tr("详细信息已写入：") + f"\n{LOG_PATH}")
     sys.exit(1)
 
@@ -292,6 +308,38 @@ try:
     ensure_seed_files()
 except Exception:
     pass
+
+
+def app_title():
+    """
+    软件名。窗口标题、标题栏、自检、启动报错都用它。
+
+    为什么不直接写 T("PDF 图纸翻译")：
+        定制版的名字带客户名（「PDF 翻译工具 DYNAMIC 定制版」），
+        这类名字不可能预先躺在翻译词表里，塞进去只会让词表变成
+        「每来一个客户就加一条」的东西。发行名归发行配置管，
+        界面词表管界面。
+    """
+    try:
+        from core import edition
+        return edition.name(i18n.is_en())
+    except Exception:
+        return T("PDF 图纸翻译")
+
+
+def app_version():
+    """版本号，跟随发行配置。定制版从 1.0.0 起算，和通用版不是同一条线"""
+    try:
+        from core import edition
+        return edition.version()
+    except Exception:
+        return ""
+
+
+def app_name_with_ver():
+    """「名称 版本」的写法，关于/自检里用"""
+    v = app_version()
+    return f"{app_title()} {v}".strip()
 
 
 def _initial_lang(cfg):
@@ -1511,7 +1559,7 @@ class App(GlassWindow):
         super().__init__(size=(880, 840), theme=self.theme, root_cls=root_cls,
                          icon_path=ICON_ICO)
 
-        self.win.title(T("PDF 图纸翻译"))
+        self.win.title(app_title())
         self._set_window_icon()
         self.files = []
         self.out_dir = ""
@@ -1584,7 +1632,7 @@ class App(GlassWindow):
         parent = self.body
 
         # 标题栏（三色圆点 + 标题 + 右侧设置入口）
-        self.title_bar = TitleBar(parent, t, self, title=T("PDF 图纸翻译"),
+        self.title_bar = TitleBar(parent, t, self, title=app_title(),
                                   on_settings=self._open_settings,
                                   icon_path=ICON_PNG)
         self.title_bar.pack(fill="x")
@@ -3726,9 +3774,38 @@ def _selftest():
                    "有可译内容的照常写", "纯尺寸不算漏译"):
             check(T(_k), False, f"{type(exc).__name__}: {exc}")
 
+    # 客户锁定的译名：只在这一版确实有锁定词时才需要验。
+    #
+    # 为什么值得占一项自检：这类词的价值全在「机器给出别的说法时能不能纠回来」。
+    # 词库改一行、正则改一个字符，都可能让它悄悄失效 —— 而失效的表现是
+    # 译文看起来完全正常（pallet 也是个合法的英文词），客户不比对旧图发现不了。
+    try:
+        _tr9 = Translator(load_config())
+        _lk = getattr(_tr9.glossary, "locked", {}) or {}
+        if not _lk:
+            check(T("客户锁定译名不被机翻改掉"), True, "本版无锁定词，跳过")
+        else:
+            _miss = []
+            for _zh, (_want, _wrongs) in _lk.items():
+                if not _wrongs:
+                    continue
+                _fake = _wrongs[0].capitalize()
+                _got = _tr9._apply_locked_terms(_zh, _fake)
+                if _want.lower() not in (_got or "").lower():
+                    _miss.append("%s→%s" % (_fake, _got))
+            check(T("客户锁定译名不被机翻改掉"), not _miss,
+                  "%d 条锁定词，%s" % (len(_lk), "全部生效" if not _miss
+                                      else "没改回来：" + "、".join(_miss)))
+    except Exception as exc:
+        check(T("客户锁定译名不被机翻改掉"), False,
+              f"{type(exc).__name__}: {exc}")
+
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")
-    report = head + "\n\n" + "\n".join(lines) + "\n\n" + \
+    # 头部点名「哪个版本、数据在哪」：客户手上可能同时装着通用版和定制版，
+    # 报问题时不写清楚版本，两边对不上号要靠猜。
+    report = head + "\n\n" + app_name_with_ver() + "\n" + \
+        "\n".join(lines) + "\n\n" + \
         i18n.fmt("数据目录：{p}", p=_DATA_DIR)
     try:
         os.makedirs(_DATA_DIR, exist_ok=True)
@@ -3737,7 +3814,7 @@ def _selftest():
             f.write(report + "\n")
     except Exception:
         pass
-    _popup(T("PDF 图纸翻译 · 自检"), report)
+    _popup(app_title() + T(" · 自检"), report)
 
 
 if __name__ == "__main__":

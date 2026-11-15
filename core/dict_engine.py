@@ -15,9 +15,32 @@ import os
 import re
 import unicodedata
 
+from . import edition
 from .paths import DATA_DIR
 
 GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.csv")
+
+
+def glossary_paths():
+    """
+    要加载的术语库文件，按优先级从高到低。
+
+    定制版把自己的锁标词表排在最前面：客户指定了「托盘 = rack」，
+    这条就必须压过通用库里同名的写法。加载用的是 setdefault（先到先得），
+    所以顺序即优先级，后面那份只在前面没有该词条时补位。
+
+    专属库缺失时只少一份词表，不影响启动 —— 客户把它误删了，
+    程序照样能翻，只是回到通用译法。
+    """
+    paths = []
+    extra = edition.extra_glossary()
+    if extra:
+        p = os.path.join(DATA_DIR, extra)
+        if os.path.exists(p):
+            paths.append(p)
+    if os.path.exists(GLOSSARY_PATH):
+        paths.append(GLOSSARY_PATH)
+    return paths
 
 # ---------------------------------------------------------------------------
 # 不译元素：这些内容属于规格、牌号、标准号，翻译反而错，必须原样保留。
@@ -179,34 +202,79 @@ def _lookup_phrase(seg, gl):
     return None, False
 
 
+def _read_csv_rows(path):
+    """
+    读术语表，返回行列表（含表头）。读不出来返回空列表。
+
+    为什么要试几种编码：
+        这份 CSV 是明确交给客户编辑的。客户用 Excel 另存，默认不一定是 UTF-8；
+        用记事本「另存为 ANSI」在老机器上就是 GBK。编码不对时 open 不报错，
+        读到第一行才抛 UnicodeDecodeError —— 而那一下如果没人接，
+        整个程序打不开，客户看到的是「双击没反应」。
+        术语表读不出来只是少一份词表，程序必须照常能翻。
+    """
+    for enc in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            with open(path, "r", encoding=enc, newline="") as f:
+                rows = list(csv.reader(f))
+            # 表头行单独丢掉：调用方已经按固定列位解析，
+            # 留着它只会多一条「中文=中文」的废词条
+            return rows[1:] if rows else []
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            return []
+    return []
+
+
 class Glossary:
     """术语库：同时持有 中→英 与 英→中 两张表"""
 
-    def __init__(self, path: str = GLOSSARY_PATH):
+    def __init__(self, path: str = None):
         self.zh2en = {}
         self.en2zh = {}
         self.en2zh_norm = {}        # 去尾标点的查表副本，见 _key_norm
         self.en2zh_loose = {}       # 连字符当空格的副本，见 _key_loose
         self.zh_maxlen = 1          # 中文词条最大字数，用于最长匹配扫描
         self.en_maxwords = 1        # 英文词条最大词数，用于 n-gram 匹配
-        self._load(path)
+        # 锁定词：{中文: (指定译名, [禁用错译, ...])}。
+        # 只有填了第 6 列「勿用」的词条才进这里，见 _load 的说明。
+        self.locked = {}
+        # 不传 path 时按发行版自动取：定制版专属库在前，通用库在后。
+        # 传了 path 就只读那一份 —— 自检和测试脚本需要能精确指定。
+        for p in ([path] if path else glossary_paths()):
+            self._load(p)
 
     def _load(self, path: str):
-        """读取 CSV 术语表。中文列/英文列/分类列"""
+        """
+        读取 CSV 术语表。列：中文, English, 分类[, 方向[, 备注]]
+
+        第 4 列「方向」是给有歧义的词条用的，留空表示双向都收：
+
+            z2e  只当中→英的词条用。英文那边有别的更常见意思时不收反向。
+                 典型是「托盘=rack」：中文说托盘就是 rack，但英文 rack
+                 在别的图纸里多半是「货架/机架」，反向收进来会把来图译错。
+            e2z  反过来，只当英→中的词条用。
+
+        用关键字精确匹配而不是「有值就是方向」：这份 CSV 是给客户直接编辑的，
+        有人会在第 4 列写备注，那时候不能被当成方向把整条词废掉。
+        """
         if not os.path.exists(path):
             return
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            for row in reader:
-                if len(row) < 2:
-                    continue
-                zh, en = normalize(row[0]), normalize(row[1])
-                if not zh or not en:
-                    continue
-                # 中→英：保留首次出现（文件靠前的优先，整句模板放前面）
+        for row in _read_csv_rows(path):
+            if len(row) < 2:
+                continue
+            zh, en = normalize(row[0]), normalize(row[1])
+            if not zh or not en:
+                continue
+            direction = (row[3].strip().lower() if len(row) > 3 else "")
+            only_z2e = direction in ("z2e", "zh2en", "中→英", "中译英")
+            only_e2z = direction in ("e2z", "en2zh", "英→中", "英译中")
+            # 中→英：保留首次出现（文件靠前的优先，整句模板放前面）
+            if not only_e2z:
                 self.zh2en.setdefault(zh, en)
-                # 英→中：英文统一大写入表，匹配时也大写化
+            # 英→中：英文统一大写入表，匹配时也大写化
+            if not only_z2e:
                 self.en2zh.setdefault(en.upper(), zh)
                 # 同一个词条的「去尾标点」形式另存一份，供带冒号/句点的写法命中。
                 # 两张副本都**无条件**存：只存「与原写法不同」的条目，
@@ -220,9 +288,26 @@ class Glossary:
                 lk = _key_loose(en.upper())
                 if lk:
                     self.en2zh_loose.setdefault(lk, zh)
-                if CJK_RE.search(zh):
-                    self.zh_maxlen = max(self.zh_maxlen, len(zh))
-                self.en_maxwords = max(self.en_maxwords, len(en.split()))
+            # 第 6 列「勿用」：这个词在英文里绝不该出现的几种写法。
+            #
+            # 为什么需要它：词库只在「整词命中」时把中文换成英文，可图纸上的
+            # 文字多数是半句、整句，走的是在线机翻或模型通道，那两条通道
+            # 根本不查词库。客户说「托盘必须是 rack」，机器给出 pallet，
+            # 词库里写得再清楚也没用 —— 只能等译文回来再纠一遍。
+            #
+            # 只列「绝不可能指这个东西」的词。像 base plate 这种既可能是
+            # 底座也可能真是底板，列进来会越改越错。
+            #
+            # 注意这段**不在**上面那个 if 里：方向标了 z2e 的词恰恰是最需要
+            # 纠错的（托盘、底座都是），跟着方向判断走会让它们一条都进不来。
+            if len(row) > 5 and row[5].strip() and not only_e2z:
+                wrongs = [w.strip() for w in
+                          re.split(r"[|;；,，]", row[5]) if w.strip()]
+                if wrongs:
+                    self.locked.setdefault(zh, (en, wrongs))
+            if CJK_RE.search(zh):
+                self.zh_maxlen = max(self.zh_maxlen, len(zh))
+            self.en_maxwords = max(self.en_maxwords, len(en.split()))
 
     def __len__(self):
         return len(self.zh2en)

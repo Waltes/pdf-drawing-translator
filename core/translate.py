@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 
 from . import dict_engine
+from . import edition
 from . import i18n
 from . import paths
 from .llm_client import (LLMClient, PRESETS, preset_for, price_of)
@@ -36,6 +37,25 @@ from .paths import DATA_DIR
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 FIXES_PATH = os.path.join(DATA_DIR, "fixes.csv")
+
+
+def fixes_paths():
+    """
+    机翻纠错表，按优先级从高到低。
+
+    定制版的专属纠错排前面：它是针对这个客户图纸总结出来的，
+    比通用表更具体，应当先命中。替换是顺序执行字符串替换，
+    所以「先表里的规则先动手」这个顺序就是优先级本身。
+    """
+    out = []
+    extra = edition.extra_fixes()
+    if extra:
+        p = os.path.join(DATA_DIR, extra)
+        if os.path.exists(p):
+            out.append(p)
+    if os.path.exists(FIXES_PATH):
+        out.append(FIXES_PATH)
+    return out
 
 # 在线接口偶尔会返回各种脏东西，必须拦在门外，不能写进图纸：
 #   [ying4 ling3]   拼音注音（MyMemory 对无译文的词会这么返回）
@@ -1039,7 +1059,9 @@ def default_config():
         #   units=metric 英制一律换算成毫米/千克
         "translate": {
             "src": "auto",
-            "dst": "auto",
+            # 定制版把默认方向定死成「中译英」（见 editions/dynamic.json）。
+            # 只影响首次启动、还没有配置文件的那一次，之后以用户的选择为准。
+            "dst": edition.default_dst() or "auto",
             "units": UNIT_METRIC,
         },
     }
@@ -1292,9 +1314,9 @@ class Translator:
         AI 时代的用途变了：主要兜住「免费机翻」和「词典拼装」的结果。
         """
         pairs = []
-        if os.path.exists(FIXES_PATH):
+        for fp in fixes_paths():
             try:
-                with open(FIXES_PATH, "r", encoding="utf-8-sig", newline="") as f:
+                with open(fp, "r", encoding="utf-8-sig", newline="") as f:
                     reader = csv.reader(f)
                     next(reader, None)
                     for row in reader:
@@ -1327,7 +1349,9 @@ class Translator:
         否则会出现「明明补了词条，结果还是老样子」这种莫名其妙的情况。
         """
         h = hashlib.md5()
-        for p in (dict_engine.GLOSSARY_PATH, FIXES_PATH):
+        # 专属词库/纠错表也要参与指纹：客户改了自己的锁标词表，
+        # 之前按旧词表算出来的缓存必须作废，否则改了词表却看不到变化
+        for p in (dict_engine.glossary_paths() + fixes_paths()):
             if os.path.exists(p):
                 h.update(f"{os.path.getmtime(p):.3f}:{os.path.getsize(p)}".encode())
         return h.hexdigest()[:16]
@@ -1532,7 +1556,8 @@ class Translator:
                 "3. Short labels: concise term only. No articles, no trailing period, no "
                 "explanations that are not in the source.\n"
                 + rule + "\n"
-                "5. These are part numbers and codes: never convert or rewrite them, copy verbatim — "
+                + self._edition_rule()
+                + "5. These are part numbers and codes: never convert or rewrite them, copy verbatim — "
                 "thread and fastener specs (1/4\"-20, M8x30, NPT 1/2), standards (ANSI, ASTM, DIN, "
                 "GB, EN), model and drawing numbers (Rev E, A-3, DN50, SCH40), material grades, "
                 "dates, page numbers.\n"
@@ -1568,7 +1593,8 @@ class Translator:
             "读起来要像当地工程师写的安装说明，能直接照着做。\n"
             "3. 短标注（几个词）译成简洁术语：不加助词，不加句号，不添加原文没有的解释。\n"
             + rule + "\n"
-            "5. 以下是标准件代号或编号，绝对不能换算、不能改写，原样照抄："
+            + self._edition_rule()
+            + "5. 以下是标准件代号或编号，绝对不能换算、不能改写，原样照抄："
             "螺纹与紧固件规格（1/4\"-20、M8×30、NPT 1/2）、标准号（ANSI、ASTM、DIN、GB、EN）、"
             "型号与图号（Rev E、A-3、DN50、SCH40）、材料牌号、日期、页码。\n"
             "5b. 工程符号原样保留，一个都不许换 —— 不许换成形状相近的字母、数字"
@@ -1589,6 +1615,71 @@ class Translator:
             "approximately→approx.。缩写只用于普通名词，型号、材料牌号、标准号照抄不缩。\n"
             "10. 只输出 JSON，不要任何解释文字。\n"
             "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
+
+    def _edition_rule(self):
+        """
+        定制版追加到系统提示词的段落：行业标签 + 客户锁标术语。
+
+        为什么不只靠术语库：
+            术语库只在「整词命中」时生效。词出现在句子中间、被拆开写、
+            带前后缀、或者和尺寸混在一起时都可能漏网，漏了就交给模型自由发挥。
+            而「客户锁标」的意思是这份图纸上这个词只能这么写，没有发挥空间。
+            所以同一批词既进词库（管逐词通道），也进提示词（管整句通道），
+            两条通道都堵住才算锁住。
+
+        通用版返回空串，提示词一个字都不变 —— 免得改这一处影响到已交付的版本。
+        """
+        if not edition.is_custom():
+            return ""
+
+        terms = self._edition_terms()
+        ind = edition.industry()
+        sep = "; " if i18n.is_en() else "、"
+        if i18n.is_en():
+            head = "Client-locked edition"
+            if ind:
+                head += " (%s)" % ind
+            head += ". The following renderings are fixed by the client — whenever the "
+            head += "concept appears, write exactly this, do not pick a synonym:\n"
+        else:
+            head = "术语锁定"
+            if ind:
+                head += "（本版面向%s）" % ind
+            head += "。以下译名由客户指定，译文里出现对应概念时必须照此写，不许换同义词：\n"
+        if not terms:
+            return head
+        # 分隔符跟随提示词语言：中文提示词里用顿号，英文提示词里用分号。
+        # 混着用不影响模型理解，但英文提示词里出现一串顿号，会让这段读起来
+        # 像是从别处粘过来的，模型对这些「不像正常英文」的片段会更随意
+        return head + sep.join(terms) + ("." if i18n.is_en() else "。") + "\n"
+
+    def _edition_terms(self):
+        """
+        专属词库里的词条，格式化成「中文=English」。最多取 40 条。
+
+        为什么限条数：提示词是按批发送的，每批都带一遍这段。词表写上百条，
+        每条请求的输入都要多上千字，成本翻倍而收益递减 —— 真正需要靠提示词
+        兜底的，是那些和常识译法不一致的少数词，而不是整份词表。
+        """
+        fn = edition.extra_glossary()
+        if not fn:
+            return []
+        p = os.path.join(DATA_DIR, fn)
+        if not os.path.exists(p):
+            return []
+        out = []
+        try:
+            with open(p, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for row in reader:
+                    if len(row) >= 2 and row[0].strip() and row[1].strip():
+                        out.append("%s=%s" % (row[0].strip(), row[1].strip()))
+                    if len(out) >= 40:
+                        break
+        except Exception:
+            return []
+        return out
 
     def _build_messages(self, batch):
         """
@@ -2179,6 +2270,13 @@ class Translator:
                 mode=self.unit_mode)
             if new != out:
                 results[i] = new
+            # 客户锁定的译名最后按一遍。放在所有换算/校验之后：
+            # 那些步骤只碰数字和单位，不会跟名词打架，但顺序清楚一点，
+            # 出问题时能确定「这一处一定是锁定词改的」
+            fixed = self._apply_locked_terms(raw, new)
+            if fixed != new:
+                results[i] = fixed
+                new = fixed
             # 记下可疑条目，供输出前复核做语义抽查（见 _review_worthy）
             if self._review_worthy(raw, new):
                 self._review_list.append((self.page_no, raw, new))
@@ -2186,6 +2284,46 @@ class Translator:
         # 界面上要按键取数，多一个键会让统计行读不到数
         self.metric_converted = getattr(self, "metric_converted", 0) + converted
         return results
+
+    def _apply_locked_terms(self, src, out):
+        """
+        把客户锁定的译名按回去。返回修正后的译文。
+
+        为什么放在所有通道的总出口，而不是各通道内部：
+            词典通道本来就在查词库，它不会错；错的是在线机翻和模型通道 ——
+            那两条根本不看词库。三条通道各有各的出口，逐个加必然漏。
+            单位换算当初就是逐个加，漏了一条路径，客户在图纸上看到
+            英制数字（v1.1.5 修的就是这个）。同一个坑不踩第二次。
+
+        只改「原文确实有这个中文词」且「译文里没出现指定译名」的条目。
+        两个条件都满足才动手：原文没有这个词，译文里出现同名英文属于
+        正常翻译（pallet 在别的句子里可能真的该写 pallet）；
+        译文已经写对了，再改只会把大小写弄乱。
+        """
+        locked = getattr(self.glossary, "locked", None)
+        if not locked or not src or not out:
+            return out
+        for zh, (want, wrongs) in locked.items():
+            if zh not in src:
+                continue
+            # 译文里已经是指定译名了（允许复数），这条就不动
+            if re.search(r"\b" + re.escape(want) + r"(?:s|es)?\b", out, re.I):
+                continue
+            for w in wrongs:
+                # 词边界 + 可选的复数后缀。不做词干匹配：
+                # PALLET 与 PALLETIZE 是两回事，误伤一次就要客户自己改图
+                pat = re.compile(r"\b" + re.escape(w) + r"(s|es)?\b", re.I)
+                m = pat.search(out)
+                if not m:
+                    continue
+                # 大小写跟着原文那个词走：句首的 Pallet 改成 Rack，
+                # 全大写的 PALLET 改成 RACK，不能一律塞小写
+                base = want.upper() if m.group(0).isupper() else (
+                    want[:1].upper() + want[1:] if m.group(0)[:1].isupper() else want)
+                repl = base + (m.group(1) or "")
+                out = out[:m.start()] + repl + out[m.end():]
+            # 换过一次之后不 break：同一句里可能有护栏和托盘两个词
+        return out
 
     def reset_metric_report(self):
         """

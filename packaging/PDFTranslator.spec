@@ -32,10 +32,35 @@ PyInstaller 打包配置（Windows）。
 """
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+
+# 发行标识：exe 名、版本信息、要打进去的专属词库，全部跟着它走。
+# 打包脚本（packaging/build_edition.py）会在调 PyInstaller 之前把项目根的
+# edition.json 改成目标版本，所以这里读到的一定是当前要打的那一版。
+#
+# 不直接 import core.edition 的原因：这个 spec 在 PyInstaller 自己的进程里执行，
+# sys.path 里还没有项目根，import 会失败；而失败发生在打包一开始，
+# 报错信息与真正的原因（一行 ImportError）隔了很远，很难看出来。
+import json
+
+_EDITION_PATH = os.path.join(ROOT, "edition.json")
+_ED = {"id": "standard", "exe_name": "PDF图纸翻译", "version": "1.1.10",
+       "glossary": ""}
+try:
+    with open(_EDITION_PATH, "r", encoding="utf-8-sig") as _f:
+        for _k, _v in json.load(_f).items():
+            if isinstance(_v, str):
+                _ED[_k] = _v
+except Exception:
+    # 读不到就用上面这组默认值，等于打通用版。绝不能因为读配置失败而打包中断 ——
+    # 那会让「忘了改配置」和「打不出包」两件事混在一起，排查成本高得多。
+    pass
+
+EXE_NAME = _ED.get("exe_name") or "PDF图纸翻译"
 
 # 只读资源。可写数据（config/cache/usage）一律不打进来 —— 见上面第 3 条。
 datas = [
@@ -44,7 +69,19 @@ datas = [
     (os.path.join(ROOT, "data", "done.wav"), "data"),       # 完成提示音
     (os.path.join(ROOT, "icon.ico"), "."),                  # 窗口/任务栏图标
     (os.path.join(ROOT, "icon.png"), "."),
+    # 发行配置：程序启动时从这里读「我是哪一版、叫什么名字、数据放哪」。
+    # 漏掉它的表现是 exe 照常启动，只是显示成通用版 —— 不报错、不崩，
+    # 所以特别容易漏过去，只在客户说「名字不对」时才被发现。
+    (os.path.join(ROOT, "edition.json"), "."),
 ]
+# 定制版的专属词库。程序按 edition.json 里的文件名到这里找，
+# 铺到数据目录后客户可以自己改（见 core/paths.py 的 SEED_FILES）。
+_extra_glossary = _ED.get("glossary") or ""
+if _extra_glossary:
+    datas.append((os.path.join(ROOT, "data", _extra_glossary), "data"))
+_extra_fixes = _ED.get("fixes") or ""
+if _extra_fixes:
+    datas.append((os.path.join(ROOT, "data", _extra_fixes), "data"))
 datas = [d for d in datas if os.path.exists(d[0])]
 
 # ---------------------------------------------------------------- RAPIDOCR
@@ -128,7 +165,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PDF图纸翻译",
+    name=EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -137,8 +174,12 @@ exe = EXE(
     disable_windowed_traceback=False,
     icon=os.path.join(ROOT, "icon.ico") if os.path.exists(
         os.path.join(ROOT, "icon.ico")) else None,
-    version=os.path.join(SPECPATH, "version_info.txt")
-    if os.path.exists(os.path.join(SPECPATH, "version_info.txt")) else None,
+    # 文件属性里的版本号/产品名。打包脚本会按当前发行版生成临时文件；
+    # 直接用版本控制里那份的话，定制版 exe 的属性会显示通用版的号。
+    version=(os.path.join(SPECPATH, "_version_info_build.txt")
+             if os.path.exists(os.path.join(SPECPATH, "_version_info_build.txt"))
+             else (os.path.join(SPECPATH, "version_info.txt")
+                   if os.path.exists(os.path.join(SPECPATH, "version_info.txt")) else None)),
 )
 
 coll = COLLECT(
@@ -147,5 +188,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="PDF图纸翻译",
+    name=EXE_NAME,
 )

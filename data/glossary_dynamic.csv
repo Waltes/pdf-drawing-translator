@@ -1,0 +1,7 @@
+﻿中文,English,分类,方向,备注,勿用
+托盘,rack,客户锁定,z2e,DYNAMIC 指定。通用库与历史译文用的是 pallet；本版以客户表为准。反向不收：英文 rack 在别的图纸里多半是货架/机架,pallet|tray|skid
+护栏,barricade,客户锁定,,DYNAMIC 指定。通用库只有「围栏=FENCE」，历史译文用的是 guardrail,guardrail|handrail|railing|fence
+合页,hinge,客户锁定,,与通用库一致，写在这里是为了让这份表自成一套、不依赖通用库,
+底座,feet,客户锁定,z2e,通用库里 BASE 与 FOOT 并存。反向不收：feet 也是「英尺」，英文来图上分不清会译错。禁用的只有「绝不可能指底座」的几个词，base plate 这类词组不动,bottom|pedestal|plinth
+斜的,slanted,客户锁定,,别用 diagonal —— 那是对角斜，只覆盖一种角度；slanted 才是任意角度的斜,diagonal|oblique
+部分,part,客户锁定,,别用 section —— 那偏指截面；part 范围更广，客户看图纸能判断指哪部分,section|portion

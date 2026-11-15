@@ -1,0 +1,17 @@
+{
+  "_说明": "DYNAMIC 定制版。版本从 1.0.0 重新起算，与通用版各走各的号；每次跟随通用版修 bug 后，按 1.0.1、1.0.2 递增。AppId 必须与通用版不同，否则装定制版会顶掉通用版。",
+  "id": "dynamic",
+  "name_zh": "PDF 翻译工具 DYNAMIC 定制版",
+  "name_en": "PDF Translation Tool - DYNAMIC Edition",
+  "version": "1.0.0",
+  "data_dir": "PDFTranslatorDynamic",
+  "exe_name": "PDF翻译工具DYNAMIC定制版",
+  "app_id_guid": "{6C2F1B74-3D88-4E5A-9A21-5B7E0C4D8F13}",
+  "output_prefix": "PDFTranslatorDynamic_Setup",
+  "glossary": "glossary_dynamic.csv",
+  "fixes": "",
+  "default_dst": "en",
+  "industry": "外贸五金建材",
+  "industry_en": "hardware, building materials and export trade",
+  "guide": "使用说明_DYNAMIC定制版.md"
+}
