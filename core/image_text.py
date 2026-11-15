@@ -27,6 +27,7 @@ import pymupdf
 from .paths import DATA_DIR
 # 折行规则与文字层共用一套（core/textfit.py）。两边各写一份的话，
 # 同一张图上一样宽的框会出现「一处折行、一处留白」的不一致。
+from . import layout
 from . import textfit
 # 字号反算与标点规范也共用一套（core/typography.py）：
 # 文字层和位图层写字的方式不同，但「写出来该多大、该有哪些空格」是同一件事。
@@ -879,7 +880,11 @@ def process_page_images(page, translate_fn, used_rects, report,
 
             bg, fg, _std = sampled
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
-                               "fg": fg, "hint": hint, "vertical": vertical})
+                               "fg": fg, "hint": hint, "vertical": vertical,
+                               # 实测墨迹高度：字号要跟原字一样高，就得知道
+                               # 原字真正多高。按框高算会偏大 —— 以前靠
+                               # 「压到框宽里」掩盖了，现在不压框宽了，必须实测
+                               "ink_h": _measure_ink_h(rgb, clip, txt_rect, zoom)})
 
     if not candidates:
         return 0
@@ -905,12 +910,28 @@ def process_page_images(page, translate_fn, used_rects, report,
     font_cjk = _get_cjk_font()
     font_latin = pymupdf.Font("helv")
 
+    # 页面占用图：必须在**任何写入之前**采一次，否则我们刚涂上去的背景色
+    # 和刚写上去的英文会被当成「原有内容」，自己把自己挡住。
+    #
+    # 不做「一次性释放所有标注框」：那样等于宣布所有标注的地盘都是无主的，
+    # 后一条会搬进前一条的位置，两条标注互换位置。改成每条只忽略自己那块
+    # （见 _plan_one 传下去的 ignore）。
+    #
+    # 构造失败不能影响出图：退回旧算法（各写各的，不做空间检查），
+    # 只是重叠问题回来而已，不该让整页翻译失败。
+    space = None
+    try:
+        space = layout.PageSpace(page)
+    except Exception:
+        space = None
+
     # v1.0.8：把「每条怎么排」和「怎么落到页面上」拆成两个模块函数。
     # 目的是让复核打回的那几条能在原位重写一遍 —— 重写要走的正是同一套
     # 排版与盖字逻辑，复制一份出来迟早会两边不一致。
     plans = []
     for c, out in zip(candidates, outs):
-        plan = _plan_one(c, out, untranslated, font_cjk, font_latin)
+        plan = _plan_one(c, out, untranslated, font_cjk, font_latin,
+                         glyph_h_hint=c.get("ink_h"), space=space)
         if plan is not None:
             plans.append(plan)
 
@@ -925,24 +946,154 @@ def process_page_images(page, translate_fn, used_rects, report,
         p = by_id.get(id(c))
         mark = None
         if p is not None:
-            # ink 里两个框都要：原 OCR 框，和实际盖字用的外扩框。
+            # ink 里三个框都要：原 OCR 框、实际盖字用的外扩框、真正落笔的写框。
             # 折行时第一行会贴到框顶之外，只按原框回读会读不到、
-            # 被判成空白块（复核打回重译也修不好，纯空转）
-            mark = {"page": None, "rect": c["rect"], "ink": [c["rect"], p[2]],
+            # 被判成空白块（复核打回重译也修不好，纯空转）；
+            # 有占用图之后译文可能被加宽或挪了一行，写框也要一起回读。
+            mark = {"page": None, "rect": c["rect"],
+                    "ink": [c["rect"], p[2], p[7] if len(p) > 7 else c["rect"]],
                     "out": p[1], "src": c["text"]}
             if write_marks is not None:
                 write_marks.append(mark)
         if fixes is not None:
             fixes.append({"page": None, "kind": "image", "obj": c,
                           "src": c["text"], "rect": c["rect"],
-                          "ink": [c["rect"], p[2]] if p is not None else [c["rect"]],
+                          "ink": ([c["rect"], p[2], p[7]] if len(p) > 7 else
+                                  [c["rect"], p[2]]) if p is not None else [c["rect"]],
                           "out": p[1] if p else None, "mark": mark})
 
     return paint_plans(page, plans, report)
 
 
+def _measure_ink_h(rgb, clip, box, zoom):
+    """
+    量一个 OCR 框里实际笔迹的高度（点数）。
+
+    OCR 框是贴着字给的，但带留白：实测 9pt 的框里字只有 5pt 高。按框高定字号
+    会写成比原文大四成的一行字，客户看到的就是「字变形了、跟旁边不一样大」。
+
+    只在框内找深色像素，框外的线条不参与。量不出来时按框高七成估 ——
+    这个退路比不估好：估错了只是字号偏大偏小，不估就是框高，偏大更多。
+    """
+    np = _numpy()
+    ink_h = box.height * 0.72
+    try:
+        x0 = max(int((box.x0 - clip.x0) * zoom), 0)
+        y0 = max(int((box.y0 - clip.y0) * zoom), 0)
+        x1 = min(int((box.x1 - clip.x0) * zoom), rgb.shape[1])
+        y1 = min(int((box.y1 - clip.y0) * zoom), rgb.shape[0])
+        sub = rgb[y0:y1, x0:x1]
+        if sub.size:
+            dark = sub.min(axis=2) < 180
+            rows = np.where(dark.any(axis=1))[0]
+            if len(rows) >= 2:
+                ink_h = (rows[-1] - rows[0] + 1) / zoom
+    except Exception:
+        pass
+    return ink_h
+
+
+def _fill_rect(r):
+    """
+    盖掉原文用的填充矩形。
+
+    外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
+    按原框高度算（不是按量出来的字高）：填充框的任务是盖住原文，
+    拿缩小的字高去算，外扩跟着变小，原来的笔画就会露一圈。
+
+    抽成函数是因为现在两个地方要用它，而且必须是同一个值：
+    排版时拿它算「要盖多大一块」，占用图初始化时拿它释放这块区域。
+    两处不一致，释放的面积大于盖的面积，就会把没盖掉的原字当成空闲。
+    """
+    pad = max(min(r.height * 0.32, 2.0), 0.6)
+    return pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
+
+
+def _box_from(x0, base, size, width, n_lines):
+    """
+    一行（或多行）译文实际占的矩形。
+
+    基线以上取 INK_TOP 倍字高（cap height + ascender 余量），以下取
+    DESCENDER 倍字高留给 y/g/p 的下伸部。多行时再往上叠 (n-1) 个行距。
+
+    这个矩形是空间检查的依据 —— 检查的必须和真正画出来的范围一致，
+    否则「检查通过」就成了空话：按框高查、按字高画，下伸部照样掉到外面。
+    """
+    lead = textfit.WRAP_LINE_LEAD
+    top = base - size * typography.INK_TOP - (max(1, n_lines) - 1) * size * lead
+    return pymupdf.Rect(x0, top, x0 + width, base + size * typography.DESCENDER)
+
+
+def _balanced_two(font, text, size):
+    """把一句话拆成大体等宽的两行。拆不开（只有一个词）返回 None"""
+    words = text.split()
+    if len(words) < 2:
+        return None
+    best = None
+    for i in range(1, len(words)):
+        a = " ".join(words[:i])
+        b = " ".join(words[i:])
+        widest = max(font.text_length(a, fontsize=size),
+                     font.text_length(b, fontsize=size))
+        if best is None or widest < best[0]:
+            best = (widest, [a, b])
+    return best[1] if best else None
+
+
+def _candidates(r, size, width, n_lines, gap, max_shift):
+    """
+    在「位移不超过 max_shift」的前提下，这条译文能挪到哪几个位置。
+
+    只有四种，因为位移预算本来就小（默认 1.5 倍字高，约 13pt）：
+      1. 原位，左端不动（允许向右加宽，加宽量算在预算里）
+      2. 原位，右端不动（向左加宽）
+      3. 整条上移一行
+      4. 整条下移一行
+
+    左右平移和四角挪位听起来更好，但在 13pt 的预算下，一条 30pt 宽的标注
+    往右挪就已经超出预算了 —— 与其假装有八个选择，不如只留做得成的四种。
+    真要往右挪一整个框宽，那是改图纸布局，不是修排版，得另外定策略。
+    """
+    desc = size * typography.DESCENDER
+    base0 = r.y1 - desc
+    out = []
+    if width <= r.width + max_shift:
+        out.append(_box_from(r.x0, base0, size, width, n_lines))
+        out.append(_box_from(r.x1 - width, base0, size, width, n_lines))
+    # 上移：基线抬到原框上沿再加 gap
+    if r.height + gap <= max_shift:
+        out.append(_box_from(r.x0, r.y0 - gap, size, width, n_lines))
+    # 下移：整个字身上沿落到原框下沿以下
+    if gap + size * typography.INK_TOP + desc <= max_shift:
+        out.append(_box_from(r.x0, r.y1 + gap + size * typography.INK_TOP,
+                             size, width, n_lines))
+    return out
+
+
+def _place_for_size(space, r, font, out, size, max_shift, ignore=None):
+    """
+    在给定字号上找一个能写下的位置，返回 (写框, 行列表) 或 None。
+
+    一行两行都试：一行最省地方，两行能换来更大的字号。同一字号下先试一行 ——
+    能在原框里一行写完，就不折成两行，看着更像原图。
+
+    ignore 只传本条自己的填充框：那块马上要被涂成背景，不算障碍。
+    """
+    gap = max(1.2, size * 0.15)
+    variants = [(1, [out])]
+    two = _balanced_two(font, out, size)
+    if two:
+        variants.append((2, two))
+    for n, lines in variants:
+        width = max(font.text_length(seg, fontsize=size) for seg in lines)
+        for box in _candidates(r, size, width, n, gap, max_shift):
+            if space.is_clear(box, ignore=ignore):
+                return box, lines
+    return None
+
+
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
-              glyph_h_hint=None):
+              glyph_h_hint=None, space=None, max_shift=None):
     """
     算出一条图内文字该不该写、写在哪个框里、用多大字号。
 
@@ -998,7 +1149,7 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 这里按原框高度算（不是按 hint 量出来的字高）：填充框的任务是盖住原文，
     # 拿缩小的字高去算，外扩跟着变小，原来的笔画就会露一圈。
     pad = max(min(box_h * 0.32, 2.0), 0.6)
-    fill = pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
+    fill = _fill_rect(r)
     # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
     # 宁可留下原文记进未译清单，也不能把图形涂掉
     if fill.width * fill.height > r.width * r.height * 3.5 + 40:
@@ -1016,6 +1167,53 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
         want_ink = glyph_h_hint or (r.width * 0.85)
     else:
         want_ink = glyph_h_hint or (r.height * 0.85)
+
+    # ---- 有占用图时：先看哪儿能放，再定字号 ----
+    #
+    # 顺序反过来是有原因的。旧算法是「框有多宽就压到多小」，字号是结果，
+    # 不是选择：框窄一点、英文长一点，字就细到看不见，或者干脆写不进去。
+    # 现在改成在「可读下限 ~ 原文大小」之间二分，找出能放下且有地方放的
+    # 最大字号 —— 位置和字号一起求解，不再被一个框的宽度锁死。
+    if space is not None and not vertical:
+        if max_shift is None:
+            max_shift = glyph_h * 1.5
+        floor_pt = typography.readable_floor(glyph_h)
+        soft_pt = max(floor_pt, glyph_h * typography.SHRINK_FLOOR)
+        want_size = typography.size_for_ink(font, out, want_ink)
+
+        # 字号上限不能是「原字大小」，得是**旧算法算出来的那个字号**。
+        # 为什么：旧算法是「压到原框宽度里」，这个值本身就在原件的量级上；
+        # 拿「原字大小」当上限，等于允许译文比原件还大 —— 实测同一页里
+        # 「Frame side view」被判成 19pt、「Frame front view」只有 13pt，
+        # 两个同样大小的原标题变得一大一小，比字小更扎眼。
+        # 上限锁在旧字号、下限压到可读线：结果只会比旧版好（够不到可读线时
+        # 靠折行和挪位去够），不会出现「凭空变大」。
+        maxw = r.width + r.height * 0.2
+        legacy_size = want_size
+        lw = font.text_length(out, fontsize=legacy_size)
+        if lw > maxw > 0:
+            legacy_size = legacy_size * maxw / lw
+        hi = max(floor_pt, min(want_size, legacy_size))
+        lo = floor_pt
+        best = None
+        for _ in range(9):
+            mid = (lo + hi) / 2
+            got = _place_for_size(space, r, font, out, mid, max_shift, ignore=fill)
+            if got is not None:
+                best = (mid, got[0], got[1])
+                lo = mid
+            else:
+                hi = mid
+        if best is not None:
+            size, box, lines = best
+            # 定稿就占住，后面的条目不许压上来
+            space.reserve(box)
+            return (c, out, fill, size, font, lines, size < soft_pt, box)
+        # 连可读下限都找不到地方：与其叠在别人身上，不如留原文并如实汇报
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
     size = typography.size_for_ink(font, out, want_ink)
     width = font.text_length(out, fontsize=size)
     if width > maxw > 0:
@@ -1062,7 +1260,9 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 第七项 small：字号落在优先线与保底线之间，写是写了但偏小。
     # 上层据此在报告里点出位置 —— 用户看图纸觉得「这块有点小」时，
     # 能查到是哪些地方、为什么小（原框太窄，英文又长）。
-    return (c, out, fill, size, font, lines, size < soft)
+    # 第八项 place：真正落笔的矩形。没有占用图时就是原框；
+    # 有占用图时可能被加宽或上下挪了一行，落笔必须按它来，不能还按原框。
+    return (c, out, fill, size, font, lines, size < soft, r)
 
 
 def paint_plans(page, plans, report=None):
@@ -1086,6 +1286,10 @@ def paint_plans(page, plans, report=None):
     for c, out, _fill, size, font, lines, *_rest in plans:
         tw = pymupdf.TextWriter(page.rect)
         color = tuple(float(v) / 255 for v in c["fg"])
+        # 落笔矩形：第八项给了就用它，没给（旧的调用方式）退回原框
+        place = _rest[1] if len(_rest) > 1 and _rest[1] is not None else c["rect"]
+        # 基线不能贴框底，要往下留出 y/g/p 的下伸部 —— 落了就压到框下的图线上
+        base_y = place.y1 - size * typography.DESCENDER
         if c.get("vertical"):
             # 竖排标注逆时针 90° 写回：以框右下角为 baseline 起点，
             # 文字向上生长，字身落在基线左侧，正好覆盖原框。
@@ -1096,17 +1300,17 @@ def paint_plans(page, plans, report=None):
             tw.append(pivot, out, font=font, fontsize=size)
             tw.write_text(page, color=color, morph=(pivot, pymupdf.Matrix(90)))
         elif lines and len(lines) > 1:
-            # 折行：末行贴原框底，其余往上叠。与文字层用同一套落点规则，
+            # 折行：末行贴基线，其余往上叠。与文字层用同一套落点规则，
             # 两处对不上的话，同一张图上折出来的行距会一紧一松。
             gap = size * textfit.WRAP_LINE_LEAD
             for k, seg in enumerate(lines):
                 base = pymupdf.Point(
-                    c["rect"].x0, c["rect"].y1 - (len(lines) - 1 - k) * gap)
+                    place.x0, base_y - (len(lines) - 1 - k) * gap)
                 tw2 = pymupdf.TextWriter(page.rect)
                 tw2.append(base, seg, font=font, fontsize=size)
                 tw2.write_text(page, color=color)
         else:
-            tw.append(pymupdf.Point(c["rect"].x0, c["rect"].y1), out,
+            tw.append(pymupdf.Point(place.x0, base_y), out,
                       font=font, fontsize=size)
             tw.write_text(page, color=color)
         if report is not None:

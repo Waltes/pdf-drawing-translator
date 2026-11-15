@@ -71,6 +71,8 @@ EN = {
     "模型补的尾零会收回": "trailing zeros added by the model are trimmed",
     "型号与公差原样不动": "part numbers and tolerances left untouched",
     "译文字号不低于可读下限": "no translation below the readable minimum",
+    "空间感知认得出图框与空白": "page space: border and blank areas detected",
+    "两条相邻标注各写各的不叠": "adjacent labels do not overlap",
     "OCR 组件不可用，跳过": "OCR unavailable, skipped",
     "{name} 计量数据校验清单": "{name} — measurement check report",
     "怎么读这份清单：\n  已纠正 —— 程序按原文重新算过并改正的，不用处理，核对一眼即可；\n  待确认 —— 程序判不准（多半是同句里数量对不上），请对照原图核实。\n\n":

@@ -54,3 +54,11 @@ sample/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 打包中途的旧产物与调试输出，不进仓库
+_old_build/
+_exe_st.out
+_tmp_*/
+
+# 发版前的对比样本（临时验证用）
+_cmp_*.pdf

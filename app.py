@@ -3498,6 +3498,59 @@ def _selftest():
     except Exception as exc:
         check(T("译文字号不低于可读下限"), False, f"{type(exc).__name__}: {exc}")
 
+    # 空间感知：造一页「两条标注只隔一个字高」的图纸，跑真实的排版决策，
+    # 看译文会不会叠在一起、会不会越出图框。
+    #
+    # 这两条盯的是客户实际报上来的病症（截图里 3mm THK corner guard 压住
+    # Yellow parts、Inner frame 压住 Purple parts）。用合成样本是因为
+    # 客户的原始文件不在我们手里，而这两种坏法跟文件无关，只跟间距有关。
+    try:
+        from core import layout as _layout
+        from core import image_text as _it
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        # 图框：右边故意留 60pt 空白，越界检测才有意义
+        page.draw_rect(pymupdf.Rect(20, 20, 340, 280), color=(0, 0, 0), width=1)
+        # 两块「图形」当障碍。要填色 —— 空心矩形框里面是白的，
+        # 探针放在框内部会被正确判成空白，测不出「挡得住」这件事
+        page.draw_rect(pymupdf.Rect(120, 90, 300, 120), color=(0, 0, 0),
+                       fill=(0.75, 0.75, 0.75), width=1)
+        page.draw_rect(pymupdf.Rect(120, 138, 300, 168), color=(0, 0, 0),
+                       fill=(0.75, 0.75, 0.75), width=1)
+
+        space = _layout.PageSpace(page)
+        frame_ok = bool(space.frame.width < page.rect.width - 30)
+        # 图形内部不许被判成空白
+        blocked = not space.is_clear(pymupdf.Rect(130, 95, 290, 115))
+        # 右上角是真空白
+        free_ok = space.is_clear(pymupdf.Rect(200, 30, 320, 44))
+        # 图框右侧那 60pt 空白在框外，不许放东西
+        outside = not space.is_clear(pymupdf.Rect(345, 100, 390, 114))
+        check(T("空间感知认得出图框与空白"),
+              frame_ok and blocked and free_ok and outside,
+              f"图框识别={frame_ok} 图形挡得住={blocked} 空白可用={free_ok} 框外拒绝={outside}")
+
+        # 两条紧邻的标注：第一条的译文按原字号放不下、必须折行，
+        # 折出来的行不许压到第二条的框上
+        c1 = {"text": "内部框架20*30*2mm", "rect": pymupdf.Rect(40, 60, 106, 71),
+              "bg": (255, 255, 255), "fg": (0, 160, 0), "hint": "zh",
+              "vertical": False, "ink_h": 9.0}
+        c2 = {"text": "紫色部分", "rect": pymupdf.Rect(60, 72, 90, 83),
+              "bg": (255, 255, 255), "fg": (0, 160, 0), "hint": "zh",
+              "vertical": False, "ink_h": 9.0}
+        p1 = _it._plan_one(c1, "Inner frame 20×30×2mm", None, space=space)
+        p2 = _it._plan_one(c2, "Purple parts", None, space=space)
+        no_overlap = bool(p1 and p2 and not p1[7].intersects(p2[7]))
+        inside = bool(p1 and space.frame.contains(p1[7]) and
+                      p2 and space.frame.contains(p2[7]))
+        check(T("两条相邻标注各写各的不叠"), no_overlap and inside,
+              f"都写成={bool(p1 and p2)} 不重叠={no_overlap} 在图框内={inside}")
+        doc.close()
+    except Exception as exc:
+        check(T("空间感知认得出图框与空白"), False, f"{type(exc).__name__}: {exc}")
+        check(T("两条相邻标注各写各的不叠"), False, f"{type(exc).__name__}: {exc}")
+
     head = T("自检全部通过 —— 这个版本可以正常用。") if ok else \
         T("自检发现问题，请把下面内容发给开发者。")
     report = head + "\n\n" + "\n".join(lines) + "\n\n" + \

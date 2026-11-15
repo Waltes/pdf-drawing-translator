@@ -75,6 +75,17 @@ SHRINK_FLOOR = 0.80
 # 都还在可读范围内。再往下就不写，保留原文并如实汇报。
 SHRINK_HARD = 0.40
 
+# 英文下伸部（y g p q j）占字号的比例。Helvetica 实测 0.212，取 0.22。
+#
+# 基线不能直接落在框底：落了，下伸部就掉到框外，压在框下面的图线或剖面线上。
+# 客户截图里「Grey parts」那一条就是这么来的 —— 中文「灰色部分」没有下伸部，
+# 英文有，同一个框底立刻现形。竖排文字用不到这个值。
+DESCENDER = 0.22
+
+# 字身相对基线的高度（cap height + 少量 ascender 余量），用于算写字矩形的高度。
+# Helvetica 的 cap height 是 0.717，小写 ascender 到 0.75，这里给 0.80 留余量。
+INK_TOP = 0.80
+
 
 def readable_floor(base_size):
     """

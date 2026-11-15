@@ -1,6 +1,6 @@
 # PDF Drawing Translator User Guide
 
-Version 1.1.4
+Version 1.1.5
 
 This guide covers the Windows edition. The program translates engineering drawings (PDF)
 between Chinese and English. Text is replaced in place, dimensions are converted to the
@@ -60,7 +60,7 @@ fails, see 3.4.
 
 ### 3.1 Installer (recommended)
 
-Run `PDFTranslator_Setup_1.1.4.exe` and follow the wizard. Shortcuts are created on the
+Run `PDFTranslator_Setup_1.1.5.exe` and follow the wizard. Shortcuts are created on the
 desktop and in the Start menu.
 
 Notes on the install:
@@ -854,12 +854,48 @@ than repainted, and listed as untranslated.
 
 Rotated labels (text turned 90° beside dimension lines) are written back in their original
 direction rather than flattened to horizontal. Laid out horizontally inside a box ten points
-wide, the text collapses to an unreadable smear that reads as a blank patch. When the
-translation is longer than the original, the font shrinks — but never below 60% of the
-original height, and never below 5.5 pt, the readable minimum. If both limits would be
-broken, that one is skipped, the original is left in place, and it is listed as untranslated.
+wide, the text collapses to an unreadable smear that reads as a blank patch.
 
-### 9.6 What happens when the translation is longer
+### 9.6 Nothing is written on top of anything else
+
+Filling a box and writing into that same box is not enough on a real drawing. Labels on a
+detail sheet sit eight points apart; four of them wrapping upwards at once will each climb
+into the one above. This produced three distinct defects on the reference drawing, all
+reported by the customer:
+
+| Symptom | Cause |
+|---|---|
+| `Inner frame 20×30×2mm` ran through `Purple parts` | Both wrapped upward from their own box bottom, straight into each other |
+| `3mm THK corner guard` ran through `Yellow parts` | Same, one row lower |
+| `Grey parts` sat on the panel edge line | The baseline was placed on the box bottom, so `y` and `p` fell below it |
+
+The program now builds an occupancy map of the page before writing anything: the page is
+rasterised at 150 dpi, every pixel that differs from the background is marked occupied, and a
+summed-area table makes "is this rectangle free" a constant-time query. The drawing border is
+detected as the largest stroked rectangle, so nothing is ever placed in the margin outside it.
+
+Placement is then solved per label, not per box:
+
+1. Font size is binary-searched in the range [readable floor, what the old fit-to-width rule
+   allowed]. The upper bound is the old value on purpose — allowing "as large as fits" made
+   two identical headings come out at 13 pt and 19 pt on the same sheet.
+2. At each candidate size the program tries, in order: the original position (widened up to
+   1.5 line heights), the same position right-aligned, one line up, one line down. Wrapping
+   to two lines is a candidate too, not a last resort.
+3. A candidate is accepted only if the rectangle is inside the drawing border, free of other
+   content, and does not overlap a label already placed on this page.
+4. The label's own box is exempt — it is about to be painted over with the sampled
+   background. Other labels' boxes are *not* exempt: without that rule, labels swap places
+   with each other.
+5. The baseline is placed one descender-height above the box bottom, so `y g p q j` no longer
+   land on whatever line sits below.
+
+The move limit is 1.5 line heights (about 13 pt on this drawing). Beyond that the leader line
+stops pointing at the part it describes, and moving a callout is a drawing change, not a
+layout fix. When no position inside that budget works, the label is left in the original
+language and listed — a gap the reader can see beats text printed over a neighbour.
+
+### 9.7 What happens when the translation is longer
 
 The same meaning runs 1.6–2.8× longer in English than in Chinese: a Chinese character is one
 em wide, a Latin letter roughly half. The box was sized for the Chinese text, so the English
@@ -871,8 +907,8 @@ Four steps now, escalating only as needed:
 | Step | Action | Detail |
 |---|---|---|
 | 1 | Tighten number formatting | The model likes to write `3mm` as `3.00mm` and `25×25×1.5` as `25×25×1.50`, adding two or three characters each time. The program trims these back to the length of the original |
-| 2 | Wrap to two lines | Same font size, one extra line. Only when there is clear space above, and never more than two lines |
-| 3 | Shrink the font | Down to 60% of the original height at most, never below 5.5 pt (about 1.9 mm on A3) |
+| 2 | Wrap to two lines | Same font size, one extra line. Only where the occupancy map shows clear space, and never more than two lines |
+| 3 | Shrink the font | Down to 40% of the original height at most, never below 5.5 pt (about 1.9 mm on A3) |
 | 4 | Keep the original | Only when all three fail; listed with its location |
 
 Step 1 also fixes something that is not merely cosmetic: `50.00` means a ±0.01 tolerance in
@@ -959,7 +995,7 @@ item-by-item table is in 4.6.
 
 ## 13 Moving and sharing
 
-To share, send `PDFTranslator_Setup_1.1.4.exe`, about 75 MB. The recipient installs it and
+To share, send `PDFTranslator_Setup_1.1.5.exe`, about 75 MB. The recipient installs it and
 is ready to use. No API key is bundled; the recipient supplies one, or works with the
 glossary and the free fallback.
 
