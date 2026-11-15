@@ -31,7 +31,7 @@
 
 #define AppName "PDF 图纸翻译"
 #define AppNameEn "PDF Drawing Translator"
-#define AppVer "1.1.5"
+#define AppVer "1.1.6"
 #define AppExe "PDF图纸翻译.exe"
 #define AppPublisher "Walter"
 

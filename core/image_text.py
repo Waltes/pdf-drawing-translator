@@ -711,6 +711,7 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
         # 量原字实际的墨迹高度（OCR 框带留白，按框高定字号会大到四成）。
         # 只在框内找深色像素，框外的线条不参与。
         ink_h = box.height * 0.72      # 量不出来时的退路：按经验比例估
+        ink_box = None                 # 实测墨迹范围，用来把填充框收到字边上
         try:
             z = 4.0
             bx0 = max(int((box.x0 - clip.x0) * z), 0)
@@ -721,10 +722,18 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
             if sub.size:
                 dark = sub.min(axis=2) < 180
                 rows = np.where(dark.any(axis=1))[0]
-                if len(rows) >= 2:
+                cols = np.where(dark.any(axis=0))[0]
+                if len(rows) >= 2 and len(cols) >= 2:
                     ink_h = (rows[-1] - rows[0] + 1) / z
+                    # 换回页面坐标。填充框按这个范围算，旁边紧贴的剖面线、
+                    # 点划线才不会被一起涂掉
+                    ink_box = pymupdf.Rect(
+                        clip.x0 + (bx0 + cols[0]) / z,
+                        clip.y0 + (by0 + rows[0]) / z,
+                        clip.x0 + (bx0 + cols[-1] + 1) / z,
+                        clip.y0 + (by0 + rows[-1] + 1) / z)
         except Exception:
-            pass
+            ink_box = None
         # hint 的语义是「原件这一行的墨迹高度」，不是字号。
         # 字号由排版模块按目标文字自己的字面比例反算（typography.size_for_ink）：
         # 同样一个字号，全大写的行（SURFACE TREATMENT）和带下伸部的行
@@ -734,7 +743,7 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
         hint = ink_h
 
         cand = {"text": text, "rect": box, "bg": bg, "fg": fg,
-                "hint": "en", "vertical": False}
+                "hint": "en", "vertical": False, "ink_box": ink_box}
         plan = _plan_one(cand, term, None, font_cjk, font_latin,
                          glyph_h_hint=hint)
         if plan is None:
@@ -879,12 +888,12 @@ def process_page_images(page, translate_fn, used_rects, report,
             vertical = bh > bw * 1.5
 
             bg, fg, _std = sampled
+            # 实测墨迹高度与水平范围：字号要跟原字一样高就得知道原字多高，
+            # 填充框要只盖字本身就得知道笔画到哪儿为止
+            _ink = _measure_ink_h(rgb, clip, txt_rect, zoom)
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
                                "fg": fg, "hint": hint, "vertical": vertical,
-                               # 实测墨迹高度：字号要跟原字一样高，就得知道
-                               # 原字真正多高。按框高算会偏大 —— 以前靠
-                               # 「压到框宽里」掩盖了，现在不压框宽了，必须实测
-                               "ink_h": _measure_ink_h(rgb, clip, txt_rect, zoom)})
+                               "ink_h": _ink[0], "ink_box": _ink[1]})
 
     if not candidates:
         return 0
@@ -928,12 +937,21 @@ def process_page_images(page, translate_fn, used_rects, report,
     # v1.0.8：把「每条怎么排」和「怎么落到页面上」拆成两个模块函数。
     # 目的是让复核打回的那几条能在原位重写一遍 —— 重写要走的正是同一套
     # 排版与盖字逻辑，复制一份出来迟早会两边不一致。
+    # v1.1.6：先按原件字高归类，同类译文才可能写出同一个字号。
+    # 必须在排版之前做完 —— 字号是排版的输入，不是它的产物；
+    # 等每条算完再回头对齐，等于让后算的去迁就先算的。
+    _assign_size_classes(candidates, outs)
+
     plans = []
     for c, out in zip(candidates, outs):
         plan = _plan_one(c, out, untranslated, font_cjk, font_latin,
                          glyph_h_hint=c.get("ink_h"), space=space)
         if plan is not None:
             plans.append(plan)
+
+    # 收口：同类里落单的那几条拉回到同一个字号。必须在登记记录之前做 ——
+    # 记录里的回读框要跟着最终写框走，拉齐改了写框，记录也得是新的。
+    _align_class_sizes(plans)
 
     # 复核重译要用的登记记录：每个候选都记一条，写成的带上译文，
     # 没写成的记 None —— 后者正是「空白块 / 未译」的打回对象，
@@ -977,6 +995,7 @@ def _measure_ink_h(rgb, clip, box, zoom):
     """
     np = _numpy()
     ink_h = box.height * 0.72
+    ink_box = None
     try:
         x0 = max(int((box.x0 - clip.x0) * zoom), 0)
         y0 = max(int((box.y0 - clip.y0) * zoom), 0)
@@ -986,25 +1005,87 @@ def _measure_ink_h(rgb, clip, box, zoom):
         if sub.size:
             dark = sub.min(axis=2) < 180
             rows = np.where(dark.any(axis=1))[0]
-            if len(rows) >= 2:
+            cols = np.where(dark.any(axis=0))[0]
+            if len(rows) >= 2 and len(cols) >= 2:
                 ink_h = (rows[-1] - rows[0] + 1) / zoom
+                # 顺带把笔迹的水平范围也量出来，回到页面坐标。
+                # 填充框按这个范围收，旁边紧贴的剖面线、点划线才不会被涂掉。
+                ink_box = pymupdf.Rect(
+                    clip.x0 + (x0 + cols[0]) / zoom,
+                    clip.y0 + (y0 + rows[0]) / zoom,
+                    clip.x0 + (x0 + cols[-1] + 1) / zoom,
+                    clip.y0 + (y0 + rows[-1] + 1) / zoom)
     except Exception:
-        pass
-    return ink_h
+        ink_box = None
+    return ink_h, ink_box
 
 
-def _fill_rect(r):
+def _assign_size_classes(candidates, outs):
+    """
+    把原件里「一样大」的文字归成一类，同类译文用一个字号。
+
+    用原件实测的墨迹高度归堆，不看框高（框带着留白，同高的字能差两成）。
+    每类取成员高度的中位数当这一类的目标高度，之后排版时每一条都按
+    「目标高度等于类高度」反算字号 —— 于是四个视图标题写出来一样高。
+
+    注意这里统一的是**字面高度**，不是字号数字：全大写的 FRAME TOP VIEW
+    和带下伸部的 Exterior front view，要写成同样高，字号数字本来就不该相同。
+    客户看的是「一样大」，不是「同一个字号数字」。
+
+    长句在窄框里可能确实放不到类高度，那一类会走「特例」通道（单独缩小并
+    在报告里点名），而不是把整类的字号都拖下来陪它 —— 一条长句拖小一页标题，
+    正是这一版要修的问题。
+    """
+    items = []
+    for c, out in zip(candidates, outs):
+        if not out or not out.strip():
+            continue
+        vertical = c.get("vertical", False)
+        h = c.get("ink_h")
+        if not h or h <= 0:
+            # 没量到墨迹高度时按经验估：横排框高含两成留白，竖排取框宽
+            h = c["rect"].width if vertical else c["rect"].height * 0.72
+        items.append((float(h), c))
+    if not items:
+        return
+    items.sort(key=lambda t: t[0])
+    classes = []
+    for h, c in items:
+        # 与当前类的基准高度比：相差在容差内就算同一类
+        if classes and h <= classes[-1][0] * (1 + typography.CLASS_TOL):
+            classes[-1][1].append((h, c))
+        else:
+            classes.append([h, [(h, c)]])
+    for _base, members in classes:
+        hs = sorted(h for h, _ in members)
+        median = hs[len(hs) // 2]
+        for _h, c in members:
+            c["cls_ink"] = median
+
+
+def _fill_rect(r, ink=None):
     """
     盖掉原文用的填充矩形。
 
-    外扩 0.32 字高：OCR 框贴着字形，笔画超出的部分全靠这里盖干净。
-    按原框高度算（不是按量出来的字高）：填充框的任务是盖住原文，
-    拿缩小的字高去算，外扩跟着变小，原来的笔画就会露一圈。
+    优先按**实测墨迹范围**收框（ink，原件里那一行字真正的像素边界），只留
+    0.5pt 抗锯齿余量。原因：原来的做法是「OCR 框再向外扩最多 2pt」，而 OCR
+    框本身已经比字大一圈，两下一叠就探出去三四个点 —— 图纸上标注紧贴剖面线、
+    点划线，这几毫米足够把线切出一道齐口，客户截图里 Inner frame 上方那条
+    剖线就是这么断的。收到底字的边界上，就不碰旁边的线了。
 
-    抽成函数是因为现在两个地方要用它，而且必须是同一个值：
-    排版时拿它算「要盖多大一块」，占用图初始化时拿它释放这块区域。
-    两处不一致，释放的面积大于盖的面积，就会把没盖掉的原字当成空闲。
+    ink 不可信（没量到、只量到一小块、超出 OCR 框太多）时退回原来的外扩：
+    宁可多盖一点，也不能留半截原字变成叠影。
     """
+    if ink is not None:
+        try:
+            ok = (ink.width >= r.width * 0.5 and ink.height >= r.height * 0.35
+                  and r.contains(ink))
+            if ok:
+                pad = 0.5
+                return pymupdf.Rect(ink.x0 - pad, ink.y0 - pad,
+                                    ink.x1 + pad, ink.y1 + pad)
+        except Exception:
+            pass
     pad = max(min(r.height * 0.32, 2.0), 0.6)
     return pymupdf.Rect(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad)
 
@@ -1040,37 +1121,35 @@ def _balanced_two(font, text, size):
     return best[1] if best else None
 
 
-def _candidates(r, size, width, n_lines, gap, max_shift):
+def _candidates(r, size, width, n_lines, gap, shift_x, shift_y):
     """
-    在「位移不超过 max_shift」的前提下，这条译文能挪到哪几个位置。
+    在预算之内，这条译文能落在哪几个位置。
 
-    只有四种，因为位移预算本来就小（默认 1.5 倍字高，约 13pt）：
-      1. 原位，左端不动（允许向右加宽，加宽量算在预算里）
-      2. 原位，右端不动（向左加宽）
-      3. 整条上移一行
-      4. 整条下移一行
+      · 左右：沿原基线加宽，左端不动或右端不动，各一个候选
+      · 上下：整条上移一行、整条下移一行
+    左对齐、右对齐都留着，是为了译文比原文短的时候仍贴着原来的对齐方向。
 
-    左右平移和四角挪位听起来更好，但在 13pt 的预算下，一条 30pt 宽的标注
-    往右挪就已经超出预算了 —— 与其假装有八个选择，不如只留做得成的四种。
-    真要往右挪一整个框宽，那是改图纸布局，不是修排版，得另外定策略。
+    横竖分开给预算：左右延伸还在同一条基线上，读起来还是同一个信息点；
+    上下挪动会把它从原来那一行挪走，客户一眼看出「这两条不挨着了」。
     """
     desc = size * typography.DESCENDER
     base0 = r.y1 - desc
     out = []
-    if width <= r.width + max_shift:
+    if width <= r.width + shift_x:
+        # 右端生长（左对齐保持）与左端生长（右对齐保持）
         out.append(_box_from(r.x0, base0, size, width, n_lines))
         out.append(_box_from(r.x1 - width, base0, size, width, n_lines))
     # 上移：基线抬到原框上沿再加 gap
-    if r.height + gap <= max_shift:
+    if r.height + gap <= shift_y:
         out.append(_box_from(r.x0, r.y0 - gap, size, width, n_lines))
     # 下移：整个字身上沿落到原框下沿以下
-    if gap + size * typography.INK_TOP + desc <= max_shift:
+    if gap + size * typography.INK_TOP + desc <= shift_y:
         out.append(_box_from(r.x0, r.y1 + gap + size * typography.INK_TOP,
                              size, width, n_lines))
     return out
 
 
-def _place_for_size(space, r, font, out, size, max_shift, ignore=None):
+def _place_for_size(space, r, font, out, size, shift_x, shift_y, ignore=None):
     """
     在给定字号上找一个能写下的位置，返回 (写框, 行列表) 或 None。
 
@@ -1086,10 +1165,34 @@ def _place_for_size(space, r, font, out, size, max_shift, ignore=None):
         variants.append((2, two))
     for n, lines in variants:
         width = max(font.text_length(seg, fontsize=size) for seg in lines)
-        for box in _candidates(r, size, width, n, gap, max_shift):
+        for box in _candidates(r, size, width, n, gap, shift_x, shift_y):
             if space.is_clear(box, ignore=ignore):
                 return box, lines
     return None
+
+
+def _best_size(space, r, font, out, lo, hi, shift_x, shift_y, ignore):
+    """
+    在 [lo, hi] 里二分找「放得下且有地方放」的最大字号。
+
+    字号越大越难放下（越宽越高），所以二分成立。返回 (字号, 写框, 行列表)，
+    一个都放不下时返回 None。shift_x / shift_y 是这一轮允许挪多远，
+    都传 0 表示只准站在原地。
+    """
+    if hi <= 0:
+        return None
+    lo = min(lo, hi)
+    best = None
+    for _ in range(9):
+        mid = (lo + hi) / 2
+        got = _place_for_size(space, r, font, out, mid, shift_x, shift_y,
+                              ignore=ignore)
+        if got is not None:
+            best = (mid, got[0], got[1])
+            lo = mid
+        else:
+            hi = mid
+    return best
 
 
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
@@ -1149,7 +1252,7 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 这里按原框高度算（不是按 hint 量出来的字高）：填充框的任务是盖住原文，
     # 拿缩小的字高去算，外扩跟着变小，原来的笔画就会露一圈。
     pad = max(min(box_h * 0.32, 2.0), 0.6)
-    fill = _fill_rect(r)
+    fill = _fill_rect(r, c.get("ink_box"))
     # 异常保护：填充框最多是原框的 3.5 倍面积，再大说明这条 OCR 框本身不可信，
     # 宁可留下原文记进未译清单，也不能把图形涂掉
     if fill.width * fill.height > r.width * r.height * 3.5 + 40:
@@ -1175,35 +1278,73 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 现在改成在「可读下限 ~ 原文大小」之间二分，找出能放下且有地方放的
     # 最大字号 —— 位置和字号一起求解，不再被一个框的宽度锁死。
     if space is not None and not vertical:
-        if max_shift is None:
-            max_shift = glyph_h * 1.5
         floor_pt = typography.readable_floor(glyph_h)
         soft_pt = max(floor_pt, glyph_h * typography.SHRINK_FLOOR)
         want_size = typography.size_for_ink(font, out, want_ink)
+        cls_ink = c.get("cls_ink")
 
-        # 字号上限不能是「原字大小」，得是**旧算法算出来的那个字号**。
-        # 为什么：旧算法是「压到原框宽度里」，这个值本身就在原件的量级上；
-        # 拿「原字大小」当上限，等于允许译文比原件还大 —— 实测同一页里
-        # 「Frame side view」被判成 19pt、「Frame front view」只有 13pt，
-        # 两个同样大小的原标题变得一大一小，比字小更扎眼。
-        # 上限锁在旧字号、下限压到可读线：结果只会比旧版好（够不到可读线时
-        # 靠折行和挪位去够），不会出现「凭空变大」。
-        maxw = r.width + r.height * 0.2
-        legacy_size = want_size
-        lw = font.text_length(out, fontsize=legacy_size)
-        if lw > maxw > 0:
-            legacy_size = legacy_size * maxw / lw
-        hi = max(floor_pt, min(want_size, legacy_size))
-        lo = floor_pt
-        best = None
-        for _ in range(9):
-            mid = (lo + hi) / 2
-            got = _place_for_size(space, r, font, out, mid, max_shift, ignore=fill)
-            if got is not None:
-                best = (mid, got[0], got[1])
-                lo = mid
-            else:
-                hi = mid
+        # 字号上限的来历（两个分支都在讲同一件事：不许凭空变大）：
+        #
+        # 无同类时取「旧算法字号」—— 旧算法是「压到原框宽度里」，这个值本身
+        # 就在原件的量级上。拿「原字大小」当上限，等于允许译文比原件还大：
+        # 实测同一页里两个同样大小的标题变成 19pt 和 13pt。
+        #
+        # 有同类时直接取「这一类的高度」反算，且只准缩一成（CLASS_FLOOR）。
+        # 这一档是 v1.1.6 加的：旧做法每条各算各的框宽，框窄的那条字号掉下来，
+        # 同一页四个视图标题写出四种大小 —— 客户的原话是「同类标题不一样大」。
+        # 放不下就折行、挪位；再放不下才降级为特例单独缩小，并在报告里点名，
+        # 不让一条长句把整页标题拖小。
+        if cls_ink:
+            # 同一个类，同一个字号 —— 直接由这类原字的墨迹高度换算成点数，
+            # 不再拿每条的译文去「按字面高反算」。
+            #
+            # 差别在哪：按字面高反算，全大写的 FRAME TOP VIEW 和带小写的
+            # Frame front view 会算出二十几点和十几点两个不同的字号（因为
+            # 两者的墨迹占比不同），写在图上就是一大一小 —— 客户的原话是
+            # 「同类标题不一样大」。换算成点数，一类就只有一个数。
+            hi = cls_ink / typography.CJK_INK_RATIO
+            lo = max(floor_pt, hi * typography.CLASS_FLOOR)
+        else:
+            maxw = r.width + r.height * 0.2
+            legacy_size = want_size
+            lw = font.text_length(out, fontsize=legacy_size)
+            if lw > maxw > 0:
+                legacy_size = legacy_size * maxw / lw
+            hi = max(floor_pt, min(want_size, legacy_size))
+            lo = floor_pt
+
+        # 第一轮：站在原地不动。
+        widen = glyph_h * typography.WIDEN_BUDGET
+        budget = (glyph_h * typography.MOVE_BUDGET
+                  if max_shift is None else max_shift)
+        best = _best_size(space, r, font, out, lo, hi, 0.0, 0.0, fill)
+        # 第二轮：只允许沿基线加宽，不许换行。英文普遍比中文长，加宽是最
+        # 不破坏观感的一种让步 —— 还在同一行、同一个起点，只是伸出去一点。
+        # v1.1.5 把加宽和上下挪位合用一个 1.5 字高预算，砍成 0.8 之后连
+        # 加宽都做不到了，一页标题只好各自缩字号，反而回到「同类大小不一」。
+        if best is None or best[0] < hi * typography.CLASS_FLOOR:
+            grew = _best_size(space, r, font, out, lo, hi, widen, 0.0, fill)
+            if grew is not None and (best is None or grew[0] > best[0]):
+                best = grew
+        # 第三轮：才允许上下挪一行。挪位是最后手段 —— 一挪就不再和原来那条
+        # 标注挨着，看着像另一个信息点（客户截图里 Yellow part 那条）。
+        if best is None or best[0] < hi * typography.CLASS_FLOOR:
+            moved = _best_size(space, r, font, out, lo, hi, widen, budget, fill)
+            if moved is not None and (best is None or moved[0] > best[0]):
+                best = moved
+        # 还是放不下：放开类字号约束，一路缩到可读下限，能写就写。
+        # 留中文比偏小更难解释，但偏小要被记下来（第七项 small）。
+        #
+        # 注意要一直探到 floor_pt，不能只降个八成就算了 —— 类字号 10pt 的
+        # 标注按 0.8 停在 7.2pt，而它其实 5.6pt 就写得下，等于白白留中文。
+        if best is None:
+            for k in range(7):
+                probe = lo + (floor_pt - lo) * k / 6.0
+                got = _place_for_size(space, r, font, out, probe, widen, budget,
+                                      ignore=fill)
+                if got is not None:
+                    best = (probe, got[0], got[1])
+                    break
         if best is not None:
             size, box, lines = best
             # 定稿就占住，后面的条目不许压上来
@@ -1265,6 +1406,54 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     return (c, out, fill, size, font, lines, size < soft, r)
 
 
+def _align_class_sizes(plans):
+    """
+    把同一类里已经定稿的字号拉齐到同一个值。
+
+    排完一轮后，同类里总有一两条因为周围太挤、落到比类字号更小的档上。
+    这时剩下的成员如果还各写各的，图上就又是「同类不一样大」—— 只是差距
+    从两档变成了一档。所以最后做一次收口：同一类取其中最小的那个字号，
+    其余成员跟着缩到它。
+
+    为什么只往小拉、不往大推：拉小一定放得下（字变小、占位跟着变小，
+    原来那块空着的地方仍然空着），往上推就得重新找位置，可能放不下。
+    代价是——只要有一条挤不下，整类都会跟着小一点。这个取舍是客户挑的：
+    同类字号不一致比整体小一号更扎眼。
+
+    例外：类字号被拖到九成以下时不再往下拉，那说明那条是真的没地方，
+    让它当特例（报告里会点名），不能为了它把整页标题缩小两成。
+    """
+    groups = {}
+    for p in plans:
+        c = p[0]
+        if not c.get("cls_ink"):
+            continue
+        groups.setdefault(round(float(c["cls_ink"]), 2), []).append(p)
+    for _key, members in groups.items():
+        if len(members) < 2:
+            continue
+        sizes = [m[3] for m in members]
+        hi = members[0][0]["cls_ink"] / typography.CJK_INK_RATIO
+        floor = hi * typography.CLASS_FLOOR
+        target = max(min(sizes), floor)
+        for idx, p in enumerate(members):
+            if p[3] <= target + 1e-6:
+                continue
+            c, out, fill, _size, font, lines, small, place = p
+            width = max(font.text_length(seg, fontsize=target)
+                        for seg in (lines or [out]))
+            box = _box_from(place.x0,
+                            place.y1 - target * typography.DESCENDER,
+                            target, width, len(lines) if lines else 1)
+            members[idx] = (c, out, fill, target, font, lines, small, box)
+        # 原位替换回 plans（保持顺序）
+        for i, p in enumerate(plans):
+            for m in members:
+                if m[0] is p[0]:
+                    plans[i] = m
+                    break
+
+
 def paint_plans(page, plans, report=None):
     """
     把排版计划落到页面上，返回写入条数。
@@ -1277,6 +1466,11 @@ def paint_plans(page, plans, report=None):
         return 0
 
     # 第一轮：用采样出来的背景色盖掉原文（不能用白色，会留下刺眼方块）
+    #
+    # v1.1.6 试过「只擦字的像素、让底下的线透出来」，用的是带 alpha 的小图贴回，
+    # 实测失败：PyMuPDF 合成 4 通道 pixmap 时把透明部分算成暗色，原字留下一圈
+    # 灰色轮廓，比白块更难看（隔离测试可复现）。所以这里回到矩形填充，
+    # 改成把矩形收紧到原字的实际墨迹范围（见 _fill_rect），不再连坐周边图线。
     for c, _out, fill, *_rest in plans:
         page.draw_rect(fill, color=None,
                        fill=tuple(float(v) / 255 for v in c["bg"]), width=0)
