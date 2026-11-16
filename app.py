@@ -575,9 +575,11 @@ class SettingsDialog:
         self.win.title(T("设置"))          # 任务栏和 Alt+Tab 靠它识别，不设会是「tk」
         self.win.overrideredirect(True)
         self.win.configure(bg=GLASS_TINT)
-        w, h = self.theme.px(760), self.theme.px(760)
-        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
-        self.win.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
+        w = self.theme.px(760)
+        self.w = w
+        self.sw, self.sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+        h = self.theme.px(760)
+        self.win.geometry(f"{w}x{h}+{(self.sw - w) // 2}+{max(0, (self.sh - h) // 3)}")
         # 不要用 transient：无边框窗口设了 transient 之后，在 Windows 上会变成
         # 「有 owner 但不显示」的状态，点了设置什么都不弹
         self.win.update_idletasks()
@@ -604,6 +606,12 @@ class SettingsDialog:
         self._model_choices = list(
             (PRESETS.get(self._choices_provider) or {}).get("models") or [])
         self._build()
+        # 高度按内容实际需要来，封顶到屏幕可用高度。
+        #
+        # 写死 760 的后果：字号调大、系统缩放不是 100%、或者屏幕矮一点的机器上，
+        # 内容比窗口高，最下面那行就被裁掉 —— 客户看到的正是「设置里没有测试连接」。
+        # 这里算一遍，内容多高就开多高；但也不能超过屏幕，否则底部落到任务栏下面。
+        self._fit_height()
         # 设置窗口固定不透明。
         #
         # 原来跟着主窗口一起设 -alpha，而这个窗口正好压在主窗口正中间：
@@ -653,9 +661,18 @@ class SettingsDialog:
             b.pack(side="left", padx=(0, t.px(8)))
             self._tab_btns[key] = b
 
+        # 底部动作条必须在页面之外，而且要用 side="bottom" 先占位。
+        #
+        # 原来它长在页面的卡片后面，pack 是按顺序切空间的：卡片先按下
+        # expand 把剩余高度吃光，动作条只能捡剩下的。内容一长（字号调大、
+        # 屏幕矮一点、缩放比例不是 100%），动作条就被压成 0 高。
+        # 客户看到的现象就是「设置里没有测试连接」—— 控件在，只是没地方待。
+        # 这种「按钮消失」不能靠调窗口高度解决：高度是死的，字号和 DPI 是活的。
+        self._build_actions(self.win)
+
         self.page_host = tk.Frame(self.win, bg=GLASS_TINT)
         self.page_host.pack(fill="both", expand=True, padx=t.px(20),
-                            pady=(0, t.px(14)))
+                            pady=(0, t.px(10)))
 
         self.page_api = tk.Frame(self.page_host, bg=GLASS_TINT)
         self.page_look = tk.Frame(self.page_host, bg=GLASS_TINT)
@@ -663,11 +680,85 @@ class SettingsDialog:
         self._build_look(self.page_look)
         self._show_tab("api")
 
+    def _fit_height(self):
+        """
+        按内容实际需要定窗口高度，并重切圆角。
+
+        为什么不能直接读 winfo_reqheight：卡片是 Canvas（见 ui_kit.Card），
+        Tk 不会因为它里面的东西变多而把 Canvas 撑高，读到的是几十像素的
+        默认值。必须直接量卡片内容的 body，再加上卡片内边距。
+
+        上限是屏幕可用区（减掉任务栏和边距）：超过它，窗口底部就沉到任务栏
+        底下，那里的按钮等于不存在。下限 520，再小卡片会被挤成一条。
+
+        圆角得跟着重切：窗口区域是按 h 切出来的，高度改了不重切，
+        底下会留一截方角。
+        """
+        t = self.theme
+        try:
+            self.win.update_idletasks()
+            pad = t.px(18) * 2 + t.px(14)      # 卡片内边距 + 投影余量
+            body = max(self._card_api.body.winfo_reqheight(),
+                       self._card_look.body.winfo_reqheight())
+            # 52 标题条 / 40 页签 / 10+14 页与动作条的外边距 / 36 动作条
+            need = body + pad + t.px(52 + 40 + 10 + 14 + 36)
+        except Exception:
+            need = t.px(760)
+        avail = self.sh - t.px(72)
+        h = max(t.px(520), min(need, avail))
+        self.win.geometry("%dx%d+%d+%d" % (
+            self.w, h, (self.sw - self.w) // 2, max(0, (self.sh - h) // 3)))
+        self.win.update_idletasks()
+        try:
+            from ui_kit import apply_round_region
+            apply_round_region(self.win.winfo_id(), self.w, h, t.px(16))
+        except Exception:
+            pass
+        self._win_h = h
+        return h
+
+    def _build_actions(self, parent):
+        """
+        窗口底部的动作条。两页共用一条，按当前页换按钮。
+
+        共用而不是各页一条：各页一条的话，两条都要跟卡片抢高度，
+        抢输那条就是「按钮不见了」。共用一条钉在窗口底部，
+        任何字号、任何 DPI、任何屏幕高度都跑不掉。
+        """
+        t = self.theme
+        self.actions = tk.Frame(parent, bg=GLASS_TINT)
+        self.actions.pack(side="bottom", fill="x", padx=t.px(20),
+                          pady=(0, t.px(14)))
+
+        # ---- AI 接口页 ----
+        # 主次跟原来一致：测试连接和查询余额是描边，保存并关闭是实心。
+        # 三个都做成实心会互相抢眼，用户不知道该点哪个
+        self.act_api = tk.Frame(self.actions, bg=GLASS_TINT)
+        self.btn_test = RoundButton(self.act_api, t, T("测试连接"), kind="ghost",
+                                    height=36, width=110, command=self._test)
+        self.btn_test.pack(side="left", padx=(0, t.px(8)))
+        self.btn_bal = RoundButton(self.act_api, t, T("查询余额"), kind="ghost",
+                                   height=36, width=110, command=self._balance)
+        self.btn_bal.pack(side="left", padx=(0, t.px(8)))
+        RoundButton(self.act_api, t, T("保存并关闭"), kind="primary", height=36,
+                    width=120, command=self._save).pack(side="right")
+
+        # ---- 外观页 ----
+        self.act_look = tk.Frame(self.actions, bg=GLASS_TINT)
+        RoundButton(self.act_look, t, T("恢复默认"), kind="ghost", height=36,
+                    width=110, command=self._reset_look).pack(side="left")
+        RoundButton(self.act_look, t, T("保存并关闭"), kind="primary", height=36,
+                    width=120, command=self._save).pack(side="right")
+
     def _show_tab(self, key):
         self._tab = key
         for f in (self.page_api, self.page_look):
             f.pack_forget()
         (self.page_api if key == "api" else self.page_look).pack(fill="both", expand=True)
+        # 按钮跟着页签换：AI 页有测试连接和查询余额，外观页有恢复默认
+        for f in (self.act_api, self.act_look):
+            f.pack_forget()
+        (self.act_api if key == "api" else self.act_look).pack(fill="x")
         # 选中的页签用主题色实心，未选中的是半透明。不加这一步两个页签
         # 长得一模一样，用户看不出自己在哪一页
         for k, b in self._tab_btns.items():
@@ -679,6 +770,9 @@ class SettingsDialog:
         card = Card(parent, t, radius=14, padding=18)
         card.pack(fill="both", expand=True)
         b = card.body
+        # 记下来：窗口高度要按卡片内容算，Card 是 Canvas，
+        # Tk 不会因为它里面的东西变多而把 Canvas 撑高
+        self._card_api = card
 
         def row(label, widget_factory, hint=""):
             wrap = tk.Frame(b, bg=CARD_BG)
@@ -813,17 +907,8 @@ class SettingsDialog:
                  bg=CARD_BG, fg=TEXT_FAINT, font=t.font(t.font_size - 2),
                  anchor="w").pack(fill="x", pady=(t.px(6), 0))
 
-        # ---- 底部动作 ----
-        btns = tk.Frame(parent, bg=GLASS_TINT)
-        btns.pack(fill="x", pady=(t.px(10), 0))
-        self.btn_test = RoundButton(btns, t, T("测试连接"), kind="ghost", height=36,
-                                    width=110, command=self._test)
-        self.btn_test.pack(side="left", padx=(0, t.px(8)))
-        self.btn_bal = RoundButton(btns, t, T("查询余额"), kind="ghost", height=36,
-                                   width=110, command=self._balance)
-        self.btn_bal.pack(side="left", padx=(0, t.px(8)))
-        RoundButton(btns, t, T("保存并关闭"), kind="primary", height=36, width=120,
-                    command=self._save).pack(side="right")
+        # 动作条不在这里：五六个按钮挤在卡片后面，卡片一长就被压没了。
+        # 现在统一钉在窗口底部，见 _build_actions。
 
         self._sync_guide()
         self._sync_model_btn()
@@ -964,6 +1049,9 @@ class SettingsDialog:
         card = Card(parent, t, radius=14, padding=18)
         card.pack(fill="both", expand=True)
         b = card.body
+        # 记下来：窗口高度要按卡片内容算，Card 是 Canvas，
+        # Tk 不会因为它里面的东西变多而把 Canvas 撑高
+        self._card_look = card
 
         def section(title, hint=""):
             f = tk.Frame(b, bg=CARD_BG)
@@ -1100,12 +1188,7 @@ class SettingsDialog:
         self.var_font.trace_add("write", lambda *a: self._refresh_preview())
         self.var_size.trace_add("write", lambda *a: self._refresh_preview())
 
-        btns = tk.Frame(parent, bg=GLASS_TINT)
-        btns.pack(fill="x", pady=(t.px(10), 0))
-        RoundButton(btns, t, T("恢复默认"), kind="ghost", height=36, width=110,
-                    command=self._reset_look).pack(side="left")
-        RoundButton(btns, t, T("保存并关闭"), kind="primary", height=36, width=120,
-                    command=self._save).pack(side="right")
+        # 按钮不在这里：两页共用窗口底部那一条，见 _build_actions
 
     def _pick_ui_lang(self, code):
         """
@@ -1186,13 +1269,16 @@ class SettingsDialog:
             pass
 
     def _rebuild(self):
-        """按新配色重建设置窗口自己的控件。窗框尺寸不动，只换皮"""
+        """按新配色重建设置窗口自己的控件，并重算高度"""
         tab = getattr(self, "_tab", "api")
         for ch in list(self.win.winfo_children()):
             ch.destroy()
         self.win.configure(bg=GLASS_TINT)
         self._build()
         self._show_tab(tab)
+        # 字号也在这条路径上改。重建之后内容高度已经变了，不重算高度的话
+        # 窗口还是旧尺寸：字号调大 → 下面那截（含动作条）又被裁掉。
+        self._fit_height()
         # 重建设置窗仍然保持不透明（原因见 __init__ 里的说明）
         try:
             self.win.attributes("-alpha", 1.0)
