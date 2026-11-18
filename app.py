@@ -3521,16 +3521,23 @@ def _selftest():
     # 2) 字号按字面高度反算。同一段墨迹高度，全大写的行要写更大的字号、
     #    带下伸部的行要写更小的字号，写出来的高度才一样 ——
     #    这是「看着不像后贴的」的关键。
+    #    拉丁文另有 INK_SCALE_LATIN 折减（见 typography 里的说明）：中译英时
+    #    英文墨迹高取汉字的七八成，否则字号数字变成中文的 1.33 倍、字宽翻两倍，
+    #    客户看到的就是「英文字太大了」。所以断言按折减后的目标比，不按 1:1。
     try:
         f = pymupdf.Font("helv")
         caps = typography.size_for_ink(f, "SURFACE TREATMENT", 6.0)
         desc = typography.size_for_ink(f, "Hot-dip galvanized", 6.0)
         cjk = typography.size_for_ink(image_text._get_cjk_font(), "门板", 6.0)
+        want_latin = 6.0 * typography.INK_SCALE_LATIN
         ok_size = (caps > desc + 0.5 and 5.5 < cjk < 7.0
                    and abs(caps * typography.ink_ratio(f, "SURFACE TREATMENT")
-                           - 6.0) < 0.05)
+                           - want_latin) < 0.05
+                   and abs(desc * typography.ink_ratio(f, "Hot-dip galvanized")
+                           - want_latin) < 0.05)
         check(T("字号按字面高度反算"), ok_size,
-              f"全大写 {caps:.2f} / 带下伸部 {desc:.2f} / 汉字 {cjk:.2f}")
+              f"全大写 {caps:.2f} / 带下伸部 {desc:.2f} / 汉字 {cjk:.2f}"
+              f" / 拉丁折减 {typography.INK_SCALE_LATIN}")
     except Exception as exc:
         check(T("字号按字面高度反算"), False, f"{type(exc).__name__}: {exc}")
 

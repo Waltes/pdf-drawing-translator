@@ -240,6 +240,10 @@ class Glossary:
         # 锁定词：{中文: (指定译名, [禁用错译, ...])}。
         # 只有填了第 6 列「勿用」的词条才进这里，见 _load 的说明。
         self.locked = {}
+        # 指定写法：{英文词: 该写成什么样}。第 7 列。
+        # 译文默认全大写（见 core/casing.py），客户想让某个词保持自己的写法时，
+        # 在这一列写死。空表就是「全按默认规则」。
+        self.case_map = {}
         # 不传 path 时按发行版自动取：定制版专属库在前，通用库在后。
         # 传了 path 就只读那一份 —— 自检和测试脚本需要能精确指定。
         for p in ([path] if path else glossary_paths()):
@@ -305,6 +309,26 @@ class Glossary:
                           re.split(r"[|;；,，]", row[5]) if w.strip()]
                 if wrongs:
                     self.locked.setdefault(zh, (en, wrongs))
+            # 第 7 列「指定写法」：这一条译文必须写成这个样子，不受全大写规则影响。
+            #
+            # 两种写法都收：
+            #   pcs=PCS      明确指定「pcs 这个词写成 PCS」
+            #   Rack         只写形态时，用自身当键（忽略大小写匹配），
+            #                即「rack 这个词写成 Rack」
+            #
+            # 为什么放在词库而不是大小写模块里：客户改的是这份 CSV，
+            # 让他另外去改程序的配置，下次换台机器就丢了。
+            if len(row) > 6 and row[6].strip() and not only_e2z:
+                for item in re.split(r"[|;；,，]", row[6]):
+                    item = item.strip()
+                    if not item:
+                        continue
+                    if "=" in item:
+                        k, v = item.split("=", 1)
+                        if k.strip() and v.strip():
+                            self.case_map[k.strip()] = v.strip()
+                    else:
+                        self.case_map[item] = item
             if CJK_RE.search(zh):
                 self.zh_maxlen = max(self.zh_maxlen, len(zh))
             self.en_maxwords = max(self.en_maxwords, len(en.split()))

@@ -246,16 +246,24 @@ class PageSpace:
             self._origin[0] + (x0 + float(idx[-1]) + 1) / sx,
             self._origin[1] + (y0 + float(ridx[-1]) + 1) / sy)
 
-    def clear_width(self, rect, limit, step=0.0):
-        """从 rect.x0 往右，最多能延伸到多少宽度（含 rcet 自身的可写部分）"""
+    def clear_width(self, rect, limit, step=0.0, ignore=None):
+        """
+        从 rect.x0 往右，最多能延伸到多少宽度（含 rect 自身的可写部分）
+
+        ignore：这块马上要被涂成背景（本条自己的原框），算占用时先扣掉。
+        不传的话，原字自己的墨迹会把整条路堵死，探测结果永远是 0 ——
+        严格模式（定制版）靠这个值决定「向右能长多长」，一传错就全废。
+        """
         lo, hi = 0.0, max(0.0, float(limit))
         if hi <= 0:
             return 0.0
-        if self.is_clear(pymupdf.Rect(rect.x0, rect.y0, rect.x0 + hi, rect.y1)):
+        if self.is_clear(pymupdf.Rect(rect.x0, rect.y0, rect.x0 + hi, rect.y1),
+                         ignore=ignore):
             return hi
         for _ in range(12):     # 二分：宽度越小越容易过，单调成立
             mid = (lo + hi) / 2
-            if self.is_clear(pymupdf.Rect(rect.x0, rect.y0, rect.x0 + mid, rect.y1)):
+            if self.is_clear(pymupdf.Rect(rect.x0, rect.y0, rect.x0 + mid, rect.y1),
+                             ignore=ignore):
                 lo = mid
             else:
                 hi = mid

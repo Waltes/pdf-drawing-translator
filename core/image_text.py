@@ -32,6 +32,8 @@ from . import textfit
 # 字号反算与标点规范也共用一套（core/typography.py）：
 # 文字层和位图层写字的方式不同，但「写出来该多大、该有哪些空格」是同一件事。
 from . import typography
+# 发行版开关：定制版要「严格原位」排版（字号位置都锁死），见 edition.strict_layout
+from . import edition
 # 工程符号的图形检测（core/glyphs.py）。OCR 读不出来的 ø，
 # 只能靠字形结构从图像里找回来，这条链独立成模块便于单独测。
 from . import glyphs
@@ -790,6 +792,191 @@ def rewrite_outlined(page, untranslated=None, write_marks=None, report=None):
     return max(n - len(failed), 0), left + failed
 
 
+def _merge_paragraphs(cands, x_em=0.5, right_em=0.8, gap_em=(-0.4, 2.0)):
+    """
+    把同一段里被 OCR 按行切开的几行合并成一条（段落级）。只在严格模式用。
+
+    为什么必须做：
+        客户图纸右侧那段说明是「10毫米的孔穿透护栏 / 左右两边管各有一个 /
+        用于护栏与护栏连接」三行，每行只有 90pt 宽。逐行翻译时每行都要
+        独立塞进 90pt，英文比中文长两倍半，只能把字号压到 5~6pt ——
+        渲染出来是一片看不清的灰字，客户原话是「这块怎么这么小」。
+        三行合成一段后，可用高度是三行的总高，字号能回到 9~10pt。
+
+    判据三条一起用，少一条都会误合并：
+      · 左端对齐 —— 折行的段落左端是一致的；而「护栏侧面位置」和它下面
+        那段差 21pt，正是靠这条分开的。
+      · 下一行不含字段冒号 —— 「表面处理：」这种是独立的字段标签，
+        不是上一句的续行。只看左端会把「材料：…」和「表面处理：…」
+        并成一句（两者左端都在 127.3）。
+      · 下一行不比上一行宽 —— 被自动折行的段落，除最后一行外都是排满的，
+        最后一行只会更短。「材料：…」193pt 到「表面处理：…」223pt 是变长，
+        说明换了一条信息，不是同一段的收尾。
+    """
+    if len(cands) < 2:
+        return cands
+    order = sorted(cands, key=lambda c: (c["rect"].y0 + c["rect"].y1) / 2)
+    out, cur = [], []
+    for c in order:
+        if not cur:
+            cur = [c]
+            continue
+        prev = cur[-1]
+        h = max(prev["rect"].height, c["rect"].height, 1.0)
+        dx0 = abs(c["rect"].x0 - prev["rect"].x0)
+        gap = c["rect"].y0 - prev["rect"].y1
+        h_ratio = abs((c.get("ink_h") or 0) - (prev.get("ink_h") or 0)) / max(
+            prev.get("ink_h") or 1.0, 1.0)
+        has_colon = ("：" in c["text"]) or bool(
+            re.search(r"(?<![0-9]):(?![0-9])", c["text"]))
+        wider = c["rect"].width > prev["rect"].width + h * 0.5
+        # 居中缩进也算续行：图纸上「方块支撑80*80*3mm」下一行的「红色部分」
+        # 是居中排的，左端差 30pt 但横向中心落在上一行范围内、且更短。
+        cx = (c["rect"].x0 + c["rect"].x1) / 2
+        centered = (prev["rect"].x0 <= cx <= prev["rect"].x1) and not wider
+        left_aligned = dx0 <= h * x_em
+        same = ((left_aligned or centered) and not has_colon and not wider
+                and gap_em[0] * h <= gap <= gap_em[1] * h
+                and h_ratio <= 0.20)
+        if same:
+            cur.append(c)
+        else:
+            out.extend(_fold_paragraph(cur))
+            cur = [c]
+    if cur:
+        out.extend(_fold_paragraph(cur))
+    return out
+
+
+def _fold_paragraph(lines):
+    """把一组行折成一条候选。单行原样返回"""
+    if len(lines) < 2:
+        return lines
+    lines.sort(key=lambda c: c["rect"].y0)
+    text = ""
+    for c in lines:
+        seg = c["text"].strip()
+        if not seg:
+            continue
+        # 行与行之间一律加空格：原文这里是折行，不是词内分隔。
+        # 不加的话「穿透护栏」+「左右两边管」会拼成「穿透护栏左右两边管」，
+        # 模型读成一个长名词，译出来就是一串没有断句的词。
+        if text:
+            text += " "
+        text += seg
+    first = lines[0]
+    rect = pymupdf.Rect(min(c["rect"].x0 for c in lines),
+                        min(c["rect"].y0 for c in lines),
+                        max(c["rect"].x1 for c in lines),
+                        max(c["rect"].y1 for c in lines))
+    inks = [c.get("ink_box") for c in lines if c.get("ink_box")]
+    ink = None
+    if inks:
+        ink = pymupdf.Rect(min(i.x0 for i in inks), min(i.y0 for i in inks),
+                           max(i.x1 for i in inks), max(i.y1 for i in inks))
+    sizes = [c.get("ink_h") or 0 for c in lines]
+    return [{"text": text, "rect": rect, "bg": first.get("bg"),
+             "fg": first.get("fg"), "hint": ocr_lang(text),
+             "vertical": first.get("vertical", False),
+             "ink_h": max(sizes) if sizes else 0.0, "ink_box": ink}]
+
+
+def _join_split(a, b):
+    """
+    把同一行上相邻的两块 OCR 结果拼成一条。
+
+    三件事要一起做，漏一件都会留下难看的痕迹：
+      1. 拼文本。两侧都是汉字就不加空格（「材料：」+「外方管」），
+         有一侧是西文才加，否则会写出「MATERIAL: OUTERSQUARE」。
+      2. 去重复标点。OCR 常把冒号同时留在前一块的尾和后一块的头 ——
+         实测「数量：」+「：750片」，直接拼就是两个冒号，
+         这正是客户截图里 QTY:: 的来源（旧版把它当翻译的错，其实在更上游）。
+      3. 框取并集。合并后的框才是这一行原文的完整范围，
+         字号按它算才不会偏小、排版才有地方折行。
+    """
+    ta, tb = a["text"].rstrip(), b["text"].lstrip()
+    punct = "：:，,；;、。."
+    if ta and tb and ta[-1] in punct and tb[0] in punct:
+        tb = tb[1:].lstrip()
+    if ta and tb and not (textfit.is_wide(ta[-1]) or textfit.is_wide(tb[0])
+                          or ta[-1] in punct):
+        text = ta + " " + tb
+    else:
+        text = ta + tb
+    ra, rb = a["rect"], b["rect"]
+    rect = pymupdf.Rect(min(ra.x0, rb.x0), min(ra.y0, rb.y0),
+                        max(ra.x1, rb.x1), max(ra.y1, rb.y1))
+    ia, ib = a.get("ink_box"), b.get("ink_box")
+    ink = None
+    if ia and ib:
+        ink = pymupdf.Rect(min(ia.x0, ib.x0), min(ia.y0, ib.y0),
+                           max(ia.x1, ib.x1), max(ia.y1, ib.y1))
+    elif ia or ib:
+        ink = pymupdf.Rect(ia or ib)
+    return {"text": text, "rect": rect, "bg": a.get("bg"), "fg": a.get("fg"),
+            "hint": ocr_lang(text), "vertical": a.get("vertical", False),
+            "ink_h": max(a.get("ink_h") or 0.0, b.get("ink_h") or 0.0),
+            "ink_box": ink}
+
+
+def _merge_split_labels(cands, gap_em=0.6, row_em=0.35):
+    """
+    把同一行上被 OCR 切碎的标注合并回一条。只在严格模式用。
+
+    为什么非合并不可（2026-11-18 实测这份图纸）：
+        OCR 把「材料：外方管20*20*1.5mm，」切成 127~169 和 171~319 两块，
+        第一块只剩 42pt 宽。英文 MATERIAL: 五个字要 48pt，放不下就一路缩，
+        最后写成 9.13pt —— 而原文墨迹高度是 21。客户看到的「字突然变小」
+        根本不是排版算法缩的，是上游把一条句子切碎了。
+        同理「表面处理：」+「热镀锌材料喷塑黑色」被切成两块，各自排，
+        一块缩到 11pt、另一块也缩，整行看着就是拼贴。
+
+    两道阈值：
+      row_em  同一行 —— 纵向中心差不超过 0.35 个字高。图纸上同一行的标注
+              基线是一致的，而上下相邻两行之间至少差一个行距（实测 1.7 字高），
+              0.35 落在这两者中间，分得开。
+      gap_em  行距 —— 允许 -0.4 到 2.0 个字高。下限给负值是必须的：
+              OCR 框是贴着笔画给的，两行字挨得紧时后一行的框顶会压进前一行
+              的框底（实测「方块支撑80*80*3mm」底 267.3、「红色部分」顶 267.0，
+              差 -0.3pt）。按正值卡，这对就永远合并不了，客户看到的就是
+              「RED PART 比上面那行小一半」。
+      另外两条是「像不像同一段」的正反判据，见下面的 has_colon / wider。
+      gap_em  同一句 —— 横向间距不超过 0.6 个字高。实测同一条内部的字间距是
+              0.1~0.25 字高，相邻两列之间是 1.7 字高以上，0.6 卡在中间。
+              不按钮字宽判断，因为「材料：」和「外方管」之间只隔了 2pt，
+              而「内方管」和「尺寸：」隔了 8pt，两处都是同一条。
+    """
+    if len(cands) < 2:
+        return cands
+    rows, cur = [], []
+    for c in sorted(cands, key=lambda x: (x["rect"].y0 + x["rect"].y1) / 2):
+        cy = (c["rect"].y0 + c["rect"].y1) / 2
+        if cur:
+            prev = cur[-1]
+            py = (prev["rect"].y0 + prev["rect"].y1) / 2
+            h = max(prev["rect"].height, 1.0)
+            if abs(cy - py) > h * row_em:
+                rows.append(cur)
+                cur = []
+        cur.append(c)
+    if cur:
+        rows.append(cur)
+
+    out = []
+    for row in rows:
+        row.sort(key=lambda c: c["rect"].x0)
+        merged = [row[0]]
+        for c in row[1:]:
+            prev = merged[-1]
+            h = max(prev["rect"].height, c["rect"].height, 1.0)
+            if c["rect"].x0 - prev["rect"].x1 <= h * gap_em:
+                merged[-1] = _join_split(prev, c)
+            else:
+                merged.append(c)
+        out.extend(merged)
+    return out
+
+
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
                         force_full=False, write_marks=None, fixes=None):
@@ -916,6 +1103,21 @@ def process_page_images(page, translate_fn, used_rects, report,
     if not candidates:
         return 0
 
+    # 严格模式：先把被 OCR 切碎的同一条标注拼回去，再翻译、再排版。
+    # 必须放在翻译之前 —— 切碎翻译出来的英文是按半句翻的，前半句
+    # MATERIAL: 后面没有宾语，翻出来也不通。
+    if edition.strict_layout():
+        candidates = _merge_split_labels(candidates)
+        # 再按段落合并：同一条说明被 OCR 按行切开时，逐行排会把字号压到看不清
+        candidates = _merge_paragraphs(candidates)
+
+    if os.environ.get("PT_DEBUG"):
+        import sys as _sys
+        for _c in sorted(candidates, key=lambda x: (x["rect"].y0, x["rect"].x0)):
+            _r = _c["rect"]
+            print(f"[cand] ({_r.x0:6.1f},{_r.y0:6.1f})-({_r.x1:6.1f},{_r.y1:6.1f})"
+                  f" ink={_c.get('ink_h', 0):5.1f} {_c['text']!r}", file=_sys.stderr)
+
     # 批量翻译（图片文字少但页多，逐条串行会把总时间拖长一倍）
     # 源的语种用每条自己的 hint，不再硬编码 "en"：中文图纸的标注传 en 进去，
     # 翻译器会判成「原文已是英文」直接原样返回，等于白跑一趟 OCR。
@@ -958,15 +1160,21 @@ def process_page_images(page, translate_fn, used_rects, report,
     # v1.1.6：先按原件字高归类，同类译文才可能写出同一个字号。
     # 必须在排版之前做完 —— 字号是排版的输入，不是它的产物；
     # 等每条算完再回头对齐，等于让后算的去迁就先算的。
-    _assign_size_classes(candidates, outs)
+    # 严格模式（定制版）跳过归类：字号按每条自己的原字高直接算，
+    # 不追求「同类同字号」—— 追求同类同字号就必须允许那条长的缩一点，
+    # 而客户要的是每条都跟自己的原文一样大。
+    if not edition.strict_layout():
+        _assign_size_classes(candidates, outs)
 
     # v1.1.7：标出哪些是「对着图形居中」的标题。也要在排版之前做完 ——
     # 它决定译文往哪边长（绕重心对称长，还是一头固定往另一头伸）。
     # 放在归类和占用图之后：判据要用到实测字高和页面占用情况。
-    try:
-        _assign_align(page, candidates, space)
-    except Exception:
-        pass
+    # 严格模式也跳过：客户要左对齐，重心对齐会把左端推走（实测偏了 25~29mm）。
+    if not edition.strict_layout():
+        try:
+            _assign_align(page, candidates, space)
+        except Exception:
+            pass
 
     plans = []
     for c, out in zip(candidates, outs):
@@ -977,7 +1185,9 @@ def process_page_images(page, translate_fn, used_rects, report,
 
     # 收口：同类里落单的那几条拉回到同一个字号。必须在登记记录之前做 ——
     # 记录里的回读框要跟着最终写框走，拉齐改了写框，记录也得是新的。
-    _align_class_sizes(plans)
+    # 严格模式跳过：这一步会改已定稿的字号，与「字号锁死」直接冲突。
+    if not edition.strict_layout():
+        _align_class_sizes(plans)
 
     # 复核重译要用的登记记录：每个候选都记一条，写成的带上译文，
     # 没写成的记 None —— 后者正是「空白块 / 未译」的打回对象，
@@ -1359,6 +1569,96 @@ def _search(space, r, font, out, lo, hi, glyph_h, align, safe,
     return rounds(allow_wrap=True)
 
 
+def _box_down(x0, base, size, width, n_lines):
+    """
+    n 行译文实际占的矩形：第一行落在原基线上，后面的行往下排。
+
+    和 _box_from 的区别：那个是往上叠（把原框当最后一行），这个是往下排。
+    严格模式用往下排 —— 图纸上的标注是从上往下读的，第一行必须还在原位，
+    读者才会把它和原来那条对上；往上叠等于整条往上面跑了。
+    """
+    lead = textfit.WRAP_LINE_LEAD
+    top = base - size * typography.INK_TOP
+    bottom = base + size * typography.DESCENDER + (max(1, n_lines) - 1) * size * lead
+    return pymupdf.Rect(x0, top, x0 + width, bottom)
+
+
+def _plan_strict(c, out, font, want_ink, fill, space, untranslated):
+    """
+    严格原位排版：字号按原文墨迹高度锁死，位置锁原文基线，只许向右长。
+
+    这是定制版的默认行为，开关见 edition.strict_layout。客户 2026-11-18 的原话：
+
+        「原文的位置，就是译文的位置，字号与原文保持一致。如果格式宽度不够，
+          允许加长，但不能超出图纸的格子。遇到超长会超出格子的，才允许换行
+          显示。但要遵从翻译目标语言的换行习惯，比如不能单词拆开。」
+        「折行，必须翻译，不能保留原文。」
+
+    为什么要把原来那套整个绕开（同类同字号 / 重心对齐 / 四轮落点搜索）：
+        那套逻辑的优化目标是「让这一页排得好看」，代价是允许缩字号、挪位置。
+        实测客户这份图纸的后果是：一条标注左移 25mm、同一行四条文字用了
+        四种字号（19.38 / 15.67 / 13.62 / 13.82）、一行被拆成两行还整体上移 15pt。
+        翻译工具没有权力替客户重排版面 —— 图纸上每个位置都是客户量过的。
+
+    取舍顺序（前四步都不动字号，只有最后一步才让）：
+        1. 原框宽度内单行写完 —— 最好，位置和字号都没动
+        2. 向右延伸到最近障碍（竖线、相邻文字、图框）为止，单行写完
+        3. 到上限仍放不下 —— 折行，第一行留在原基线，后面的行往下排
+        4. 往下压到东西 —— 折行往上叠（原基线当最后一行）
+        5. 还不行 —— 缩字号重来。绝不保留原文：客户要的是译文
+    """
+    r = c["rect"]
+    base_size = typography.size_for_ink(font, out, want_ink)
+    base = r.y1 - base_size * typography.DESCENDER      # 原基线
+
+    if space is None:
+        width = font.text_length(out, fontsize=base_size)
+        return (c, out, fill, base_size, font, None, False,
+                _box_from(r.x0, base, base_size, width, 1))
+
+    # 这一条往右还有多少空地：以译文实际占的高度带为准，不是以原框为准 ——
+    # 英文的字面高度和中文不一样，用原框高度去探，探出来的边界会偏。
+    band = pymupdf.Rect(r.x0, base - base_size * typography.INK_TOP,
+                        r.x1, base + base_size * typography.DESCENDER)
+    limit = max(r.width, space.frame.x1 - r.x0)
+    room = max(space.clear_width(band, limit, ignore=fill), r.width)
+
+    size = base_size
+    for _ in range(8):
+        width = font.text_length(out, fontsize=size)
+        if os.environ.get("PT_DEBUG"):
+            import sys as _sys
+            print(f"[strict] sz={size:5.2f} w={width:6.1f} room={room:6.1f} "
+                  f"x0={r.x0:6.1f} base={base:6.1f} {out[:34]!r}", file=_sys.stderr)
+        # 1) 单行，左端锁死，原框内就放得下
+        box = _box_from(r.x0, base, size, width, 1)
+        if width <= room and space.is_clear(box, ignore=fill):
+            space.reserve(box)
+            return (c, out, fill, size, font, None, False, box)
+        # 2)(3)(4) 折行。wrap_text 不拆单词，词内不软断 —— 这是硬要求
+        lines = textfit.wrap_text(font, out, room, size)
+        if lines:
+            widest = max(font.text_length(seg, fontsize=size) for seg in lines)
+            for cand in (_box_down(r.x0, base, size, widest, len(lines)),
+                         _box_from(r.x0, base, size, widest, len(lines))):
+                if space.is_clear(cand, ignore=fill):
+                    space.reserve(cand)
+                    return (c, out, fill, size, font, lines,
+                            len(lines) > 1, cand)
+        # 5) 缩一档重来。0.85 是有意的：一档缩太多，同一页里几条需要缩的
+        #    会长得明显不一样；缩到 3.5pt 以下就停，再小印不出来
+        if size * 0.85 < typography.MIN_SIZE:
+            break
+        size *= 0.85
+    # 缩到最小还放不下：仍然写，占住原框那一条。
+    # 不保留原文是客户明确要求的（「折行，必须翻译，不能保留原文」），
+    # 代价是这一处会偏小或伸出去一点，如实记进偏小清单。
+    width = font.text_length(out, fontsize=typography.MIN_SIZE)
+    box = _box_from(r.x0, base, typography.MIN_SIZE, width, 1)
+    space.reserve(box)
+    return (c, out, fill, typography.MIN_SIZE, font, None, True, box)
+
+
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
               glyph_h_hint=None, space=None, max_shift=None):
     """
@@ -1454,6 +1754,11 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
         want_ink = glyph_h_hint or (r.width * 0.85)
     else:
         want_ink = glyph_h_hint or (r.height * 0.85)
+
+    # 定制版走严格原位（字号锁死、位置锁死、只许向右长、放不下才折行）。
+    # 通用版保持下面那套「同类同字号 + 重心对齐 + 四轮落点搜索」不动。
+    if edition.strict_layout() and not vertical:
+        return _plan_strict(c, out, font, want_ink, fill, space, untranslated)
 
     # ---- 有占用图时：先看哪儿能放，再定字号 ----
     #

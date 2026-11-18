@@ -28,9 +28,11 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 
 from . import dict_engine
+from . import casing
 from . import edition
 from . import i18n
 from . import paths
+from . import typography
 from .llm_client import (LLMClient, PRESETS, preset_for, price_of)
 from .paths import DATA_DIR
 
@@ -2215,6 +2217,56 @@ class Translator:
         return self._numbers_preserved(src, out, dst)
 
     # ---------------- 批量并发翻译（主入口） ----------------
+    # ---- 客户锁定叫法的术语保护 ----
+    #
+    # 为什么要在送翻译之前做，而不是回来再纠：
+    #   「勿用」列是黑名单，AI 每换一个词就得客户往表里加一条，永远追不上。
+    #   实测客户这份图纸，「临时护栏托盘俯视图」被译成 TEMPORARY BARRICADE
+    #   BRACKET —— 托盘写成「支架」，客户拿去报价就是另一个东西。
+    #   而 bracket / pallet / tray / skid 都可能出现，逐一封堵没有尽头。
+    #
+    # 做法：把客户指定的中文叫法换成 [[T0]] 这样的占位符再送翻译，
+    # 模型根本不参与命名，回来只做一次替换。
+    # 带方括号的写法是刻意选的：模型对 [[...]] 这类标记最保守，实测会原样
+    # 保留并按目标语言调好语序；换成私有区字符有一半概率被当乱码删掉。
+    #
+    # 只对独立标注生效，整句里照旧不保护 —— 这是客户给定的规则
+    # （出现在整句或文章里就不必遵守），见 _is_label。
+    _PH_FMT = "[[T{d}]]"
+
+    def _mask_locked(self, text):
+        """把客户锁定的词换成占位符。返回 (掩码文本, [(占位符, 指定译名)])"""
+        locked = getattr(self.glossary, "locked", None)
+        if not locked or not text or not self._is_label(text):
+            return text, []
+        out, pairs = text, []
+        for zh, (want, _wrongs) in locked.items():
+            if not zh or zh not in out:
+                continue
+            ph = self._PH_FMT.format(d=len(pairs))
+            # 两侧留空格：两个锁定词挨着时（「护栏托盘」），不加空格模型会把
+            # [[T1]][[T0]] 连着吐出来，还原成 BARRICADERACK —— 一个不存在的词。
+            # 中文里多出来的空格由后面的标点规范化压掉，不影响可读性。
+            out = out.replace(zh, f" {ph} ")
+            pairs.append((ph, want))
+        return (out, pairs) if pairs else (text, [])
+
+    def _unmask_locked(self, out, pairs):
+        """把占位符换回指定译名。模型把占位符吞掉的记一笔，交给后面的兜底"""
+        if not pairs or not out:
+            return out
+        for ph, want in pairs:
+            core = ph[2:-2]           # "[[T0]]" -> "T0"
+            pat = re.compile(r"\[\[\s*" + re.escape(core) + r"\s*\]\]", re.I)
+            if pat.search(out):
+                out = pat.sub(want.upper(), out)
+            elif not re.search(r"\b" + re.escape(want) + r"(?:s|es)?\b",
+                               out, re.I):
+                self.lost_terms = getattr(self, "lost_terms", 0) + 1
+        # 遮罩时补的空格在这里收掉；两个术语之间保留一个
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        return out
+
     def translate_many(self, items, max_workers=12, progress=None):
         """
         批量翻译，返回与 items 等长的译文列表。items: [(text, lang), ...]
@@ -2232,7 +2284,14 @@ class Translator:
         最后一道是校验：拿原文独立复算一遍，与译文里的数值配对比对。
         算错数的直接改成复算值，改不了的记进 metric_report 交给人看。
         """
-        results = self._translate_inner(items, max_workers, progress)
+        masked, metas = [], []
+        for text, hint in items:
+            m, pairs = self._mask_locked(text)
+            masked.append((m, hint))
+            metas.append(pairs)
+        results = self._translate_inner(masked, max_workers, progress)
+        results = [self._unmask_locked(r or "", p)
+                   for r, p in zip(results, metas)]
         converted = 0
         for i, (raw, hint) in enumerate(items):
             out = results[i]
@@ -2286,6 +2345,23 @@ class Translator:
             if fixed != new:
                 results[i] = fixed
                 new = fixed
+            # 标点本地化 + 大小写规范。放在锁定词之后、所有通道之外的同一位置，
+            # 理由和锁定词一样：三条通道各有各的出口，逐个加必然漏。
+            #
+            # 为什么必须做（2026-11-18 客户图纸实测）：
+            #   · 「数量：750片」译成「QTY:: 750 pcs」—— 译名自带冒号，
+            #     AI 又把源的「：」留了一次。图纸上两个冒号是明显的排版事故。
+            #   · 「20*20*1.5mm」的星号没换成乘号 ×，海外买家会当通配符。
+            #   · 一条译文是 MATERIAL 全大写、下一条是 hot-dip galv. material
+            #     全小写 —— 中文源给不出大小写，只能按硬规则统一（全大写，
+            #     单位小写），见 core/casing.py。
+            localized = typography.localize(new, dst)
+            if dst == "en":
+                localized = casing.normalize_case(
+                    localized, getattr(self.glossary, "case_map", None))
+            if localized != new:
+                results[i] = localized
+                new = localized
             # 记下可疑条目，供输出前复核做语义抽查（见 _review_worthy）
             if self._review_worthy(raw, new):
                 self._review_list.append((self.page_no, raw, new))
@@ -2299,20 +2375,32 @@ class Translator:
     #
     # 8 是量着客户图纸上的实际写法定的：临时护栏托盘俯视图（5）、
     # 3.05米护栏托盘示意图（4）都在这条线内，是标注。
+    # 一条标注最多允许多少字。超过就当 OCR 把好几条不相干的内容拼成了一条。
+    #
+    # 8 是老值，判的是「剥掉锁定词后还剩几个汉字」，2026-11-18 已废：
+    # OCR 把一段说明按行切碎再合并回来，汉字照样十几个，整段判不成标注，
+    # 客户锁定的叫法就不生效（实测译出 PALLET、GUARDRAIL）。
+    # 判「是不是一句话」看谓语（SENTENCE_WORDS）就够了，字数不是判据。
+    # 保留常量只为兼容外部引用，_is_label 不再用它。
     LABEL_MAX_FILLER = 8
 
     # 出现这些就说明有谓语或连接结构 —— 这是句子，不是标注。
     #
     # 为什么用词表而不是数汉字：名词短语可以很长（临时护栏托盘俯视图），
     # 句子可以很短（底层采用托盘堆叠）。字数分不开这两类，谓语能。
-    # 「采用」「使用」「安装」这些是图纸说明句里最常见的谓语；
-    # 「以免」「防止」「注意」是常见的连接/祈使。
+    #
+    # ⚠ 只收**明确的句子标志**。曾经这里还有「安装、焊接、固定、连接、
+    # 组装、调节、粘贴」这些动词，结果「用于护栏与护栏连接」被判成整句，
+    # 客户的叫法（护栏=barricade）不生效，图上写出 GUARDRAILS TO EACH
+    # OTHER；「用于护栏与底座连接」写出 THE RAILING TO THE BASE。
+    # 这几个词在图纸上多数是动名词或名词（护栏连接、底座安装位置），
+    # 不是谓语。判断「是不是一句话」宁严勿宽 —— 少保护一条只是术语不生效，
+    # 多保护一条也只是把客户的叫法照写上，两种都不会把图改坏；
+    # 反过来误判成整句，就是图上出现客户明令禁止的词。
     SENTENCE_WORDS = (
-        "采用", "使用", "通过", "进行", "需要", "必须", "不得", "可以",
-        "应当", "应按", "如果", "因为", "所以", "以便", "以免", "防止",
-        "避免", "注意", "安装", "焊接", "固定", "放置", "堆放", "堆叠",
-        "码放", "包装", "装入", "连接", "组装", "拆卸", "调节", "拧紧",
-        "粘贴", "贴上", "分别", "依次", "同时", "然后",
+        "采用", "使用", "如果", "因为", "所以", "以便", "以免",
+        "防止", "避免", "需要", "必须", "不得", "可以", "应当", "应按",
+        "这是", "那是", "是由于",
     )
 
     def _is_label(self, src):
@@ -2338,17 +2426,22 @@ class Translator:
             return False
         if any(w in src for w in self.SENTENCE_WORDS):
             return False
-        # 成段文字直接排除。图纸上不会有三十个字的独立标注，
-        # 这么长的多半是 OCR 把相邻几行合成了一条。
-        if len(src) > 30:
+        # 成段文字直接排除。图纸上的独立标注一般不会超过三十字，
+        # 但**合并过的段落会**：OCR 把一条说明按行切成三行，合并之后
+        # 就是四五十个字（实测「5根40*80*3mm方管*1103毫米长 托盘最下层，
+        # 蓝色部分」33 字）。按 30 字卡会把这类整段判成句子，客户锁定的
+        # 叫法就不生效了 —— 实测这条被译成 BOTTOM LAYER OF THE PALLET。
+        # 真正的整句靠谓语判（SENTENCE_WORDS），不靠字数，所以这里放宽到 60。
+        if len(src) > 60:
             return False
-        rest = src
-        for zh in (getattr(self.glossary, "locked", {}) or {}):
-            rest = rest.replace(zh, "")
-        # 数字、字母、单位符号都不算「句子成分」
-        rest = re.sub(r"[0-9A-Za-z%‰+\-–—./\\×*=#@&'\"()\[\]{}<>±°øØ⌀φΦ\s]", "",
-                      rest)
-        return len(rest) <= self.LABEL_MAX_FILLER
+        # 长度兜底：真正成段的说明（技术要求那类）通常有谓语，会被上一条挡住；
+        # 这里只挡 OCR 把好几条不相干的内容拼成一条的异常情况。
+        # 曾经这里还有一条「剥掉锁定词后剩余汉字 ≤8」，用来判「罗列式长串」。
+        # 那条是错的：OCR 把一段标注按行切碎、再合并回来之后，汉字照样十几个
+        # （「5根40*80*3mm方管*1103毫米长 托盘最下层，蓝色部分」剩 11 个），
+        # 于是整段判不成标注、客户的叫法不生效 —— 实测译出 PALLET / GUARDRAIL。
+        # 判「是不是句子」看谓语就够了，字数不是判据。
+        return len(src) <= 60
 
     def _apply_locked_terms(self, src, out):
         """

@@ -261,7 +261,13 @@ def _insert_pos(text, frac):
     """
     按横向相对位置 frac（0~1）算出该插在第几个字符之前。
 
-    只认数字、字母和误读字符：落在汉字上说明对齐估偏了，返回 None 让调用方放弃。
+    只认 ASCII 数字和字母：落在汉字上说明对齐估偏了，返回 None 让调用方放弃。
+
+    ⚠ 这里曾经写的是 ch.isalpha()，而 Python 对汉字也返回 True ——
+    于是「边框方管20*20*1.5mm」里的「边」字被判成直径符号后，
+    真的插进了译文，成了一条客户截图上出现的「Ø FRAME SQUARE」。
+    方管被标成圆管，比漏认一个符号严重得多。
+    加 isascii() 是这道闸门的全部意义：直径符号只跟着拉丁数字走。
     """
     ems = [_char_em(c) for c in text]
     total = sum(ems) or 1.0
@@ -271,12 +277,27 @@ def _insert_pos(text, frac):
         acc += em
         if abs(center - frac) <= 0.5 * em / total + 0.06:
             ch = text[i]
-            # 数字和字母是正常落点。误读字符（@）也必须算落点 ——
+            # 数字和拉丁字母是正常落点。误读字符（@）也必须算落点 ——
             # 它本身就是来被替换掉的那个字符，把它拒了等于「判出了符号
-            # 却补不进去」，@12mm 会原样留着。汉字不认。
-            if ch.isdigit() or ch.isalpha() or ch in MISREAD_SYMBOLS:
+            # 却补不进去」，@12mm 会原样留着。汉字不认，见上面的说明。
+            if ch.isascii() and (ch.isdigit() or ch.isalpha()) \
+                    or ch in MISREAD_SYMBOLS:
                 return i
     return None
+
+
+def _near_digit(out, pos):
+    """
+    插入点紧邻有没有数字。
+
+    直径符号永远贴着数字写（ø12、Ø50），位置附近一个数字都没有，
+    说明判出来的「符号」其实是别的字形 —— 客户图纸上的「边框方管」
+    被补成 Ø FRAME SQUARE、方管被标成圆管，就是从这条路进来的。
+    """
+    for i in (pos - 1, pos, pos + 1):
+        if 0 <= i < len(out) and out[i].isdigit():
+            return True
+    return False
 
 
 def _apply(out, pos, ch):
@@ -304,7 +325,9 @@ def _apply(out, pos, ch):
     #    按数字处理，不补。这一道挡的就是「带斜线的零」。
     if pos < len(out) and out[pos] in DIGIT_LOOKALIKE:
         return out, False
-    # ⑤ 位置是干净的，插进去。
+    # ⑤ 位置是干净的 —— 但只有紧邻数字才算数。详见 _near_digit
+    if not _near_digit(out, pos):
+        return out, False
     return out[:pos] + ch + out[pos:], True
 
 
