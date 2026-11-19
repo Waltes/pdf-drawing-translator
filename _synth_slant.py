@@ -86,6 +86,60 @@ def make():
     return src
 
 
+def make_accept():
+    """
+    造一份「改动点验收件」：四条中文，每条对应 1.1.7 的一个改动。
+
+    客户图纸里查不到能验这些的素材 —— 日期在 7 份图纸里一条都没有，
+    斜排只有 br01 一条 38° 的纯尺寸，所以手工试的时候拿真实图纸
+    根本看不到改动有没有生效。这张图用来一次看全：
+
+      ① 横排 日期：2026年11月16日   → 验月份校验（原来被数字规则拦下留中文）
+      ② 横排 总长2.79米            → 验长度统一 mm（原来留「2.79米」或半换算）
+      ③ 竖排 上下调节100mm         → 验竖排不被判成横排、竖直写回
+      ④ 斜排 半径35mm圆管（沿25°）→ 验斜排沿原角度写回、不压引线
+
+    只造图不跑翻译 —— 用法是用户自己在界面上拖这份进去点「开始」。
+    """
+    os.makedirs(OUT, exist_ok=True)
+    W, H = 1200, 700
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    px = 24                                  # 位图 24px → PDF 上 6pt，图纸小标注量级
+    font = ImageFont.truetype(FONT_CN, px)
+
+    # ① 日期（横排，左上）
+    d.text((60, 40), "日期：2026年11月16日", font=font, fill=(0, 0, 0))
+    # ② 长度（横排，日期下方）—— 原文用米，看译完是不是 2790mm
+    d.text((60, 110), "总长2.79米", font=font, fill=(0, 0, 0))
+
+    # ③ 竖排（右侧，紧贴一条竖线，模拟尺寸线旁标注）
+    tC = _text_layer(px, "上下调节100mm", 90)
+    img.paste(tC, (930, 300), tC)
+    d.line([(912, 360), (912, 540)], fill=(0, 0, 0), width=2)
+
+    # ④ 斜排（左下，沿 25° 引线）
+    ax, ay = 150, 600
+    bx = ax + 340 * math.cos(math.radians(-25))
+    by = ay + 340 * math.sin(math.radians(-25))
+    d.line([(ax, ay), (bx, by)], fill=(0, 0, 0), width=2)
+    d.ellipse([ax - 8, ay - 8, ax + 8, ay + 8], outline=(0, 0, 0), width=2)
+    tD = _text_layer(px, "半径35mm圆管", 25)
+    img.paste(tD, (int(ax + 80), int(ay - 160)), tD)
+
+    png = os.path.join(OUT, "accept_src.png")
+    img.save(png)
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)      # A4 竖版
+    page.insert_image(pymupdf.Rect(30, 40, 565, 352), filename=png)
+    src = os.path.join(OUT, "验收件_源.pdf")
+    doc.save(src)
+    doc.close()
+    print("验收件：", src)
+    return src
+
+
 def run(src):
     """跑一遍中→英，导出输出 PDF、对照 PNG 和每条的位置角度。"""
     import core.edition as EDITION
@@ -137,5 +191,7 @@ def run(src):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "make":
         make()
+    elif len(sys.argv) > 1 and sys.argv[1] == "accept":
+        make_accept()
     else:
         run(make())
