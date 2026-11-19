@@ -2521,7 +2521,7 @@ class Translator:
             #     单位小写），见 core/casing.py。
             localized = typography.localize(new, dst)
             if dst == "en":
-                localized = casing.normalize_case(
+                localized = casing.apply_style(
                     localized, getattr(self.glossary, "case_map", None))
             if localized != new:
                 results[i] = localized
@@ -2868,7 +2868,7 @@ class Translator:
                 val = typography.unify_length(val)
                 val = typography.localize(val, dst)
                 if dst == "en":
-                    val = casing.normalize_case(
+                    val = casing.apply_style(
                         val, getattr(self.glossary, "case_map", None))
                 out[i] = val
                 self.stats["llm"] += 1

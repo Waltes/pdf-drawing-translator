@@ -435,6 +435,16 @@ def _split_punct(tok: str):
     return m.group(1), m.group(2), m.group(3)
 
 
+def _case(s: str) -> str:
+    """
+    词典通道的译文大小写，与 core/casing.apply_style 走同一个发行版开关。
+
+    定制版转全大写（图纸标注惯例）；通用版保持词表里的原写法 —— 通用版
+    不做大小写风格干预，见 core/casing.py 开头的说明。
+    """
+    return s.upper() if edition.upper_case() else s
+
+
 def zh_to_en(text: str, gl: Glossary):
     """
     中文 → 英文。
@@ -446,8 +456,8 @@ def zh_to_en(text: str, gl: Glossary):
 
     # 1. 整句模板优先：技术要求里的整句必须整体替换，逐词拼会读不通
     if text in gl.zh2en:
-        # 图纸英文标注惯用全大写
-        return gl.zh2en[text].upper(), []
+        # 图纸英文标注惯用全大写（定制版）；通用版照词表写法
+        return _case(gl.zh2en[text]), []
 
     # 1.5 固定句式规则（第 3 页，共 7 页 这类）
     ruled = _apply_rules(text, ZH_RULES)
@@ -481,7 +491,7 @@ def zh_to_en(text: str, gl: Glossary):
             chunk = work[i:i + size]
             if chunk in gl.zh2en:
                 # 只大写译文本身，被保护的尺寸/牌号不参与大写，避免 Ra3.2 变成 RA3.2
-                out.append(" " + gl.zh2en[chunk].upper() + " ")
+                out.append(" " + _case(gl.zh2en[chunk]) + " ")
                 i += size
                 matched = True
                 break

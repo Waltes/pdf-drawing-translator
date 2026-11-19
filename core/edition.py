@@ -33,7 +33,7 @@ _DEFAULT = {
     "id": "standard",
     "name_zh": "PDF 图纸翻译",
     "name_en": "PDF Drawing Translator",
-    "version": "1.1.12",
+    "version": "1.1.13",
     "data_dir": "PDFDrawingTranslator",
     "exe_name": "PDF图纸翻译",
     "app_id_guid": "{E07108F2-9CFA-4C91-A748-948BDE9016E8}",
@@ -44,6 +44,7 @@ _DEFAULT = {
     "industry": "",
     "industry_en": "",
     "strict_layout": "",
+    "uppercase": "",
 }
 
 _FILENAME = "edition.json"
@@ -233,6 +234,25 @@ def default_dst():
     用户改过之后以配置文件为准，这里只影响「还没有配置」的那一次。
     """
     return _CFG["default_dst"]
+
+
+def upper_case():
+    """
+    译文英文是否强制全大写。开关在 editions/<id>.json 的 uppercase。
+
+    定制版开（true）：客户是外贸五金，图纸发到海外/车间，标注惯例就是全大写，
+    同一页里大写小写混着看起来像两个人写的。
+
+    通用版关（默认）：通用版是给普通用户翻各种图纸的，全大写只属于机械制图标注
+    这一种场景 —— 一份说明性文字、一页产品资料也全大写，读起来全是重音，
+    客户会当成排版错误。关掉它就是「模型译成什么样就什么样」，即一般翻译的
+    大小写规则（句首大写、专有名词大写、其余小写）。
+
+    为什么做得和 strict_layout 一样是开关而不是直接改掉：
+        两种取向都成立，取决于这张图纸要拿去干什么。按发行版分开，
+        通用版的行为不被客户的特殊要求绑住，定制版也不被通用版的默认值拖回来。
+    """
+    return _CFG["uppercase"].strip().lower() in ("1", "true", "yes", "on")
 
 
 def strict_layout():
