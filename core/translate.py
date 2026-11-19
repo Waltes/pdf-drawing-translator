@@ -2290,8 +2290,20 @@ class Translator:
             masked.append((m, hint))
             metas.append(pairs)
         results = self._translate_inner(masked, max_workers, progress)
-        results = [self._unmask_locked(r or "", p)
-                   for r, p in zip(results, metas)]
+        # 翻译没成功（接口 401、超时、限流）时，通道会把入参原样返回 ——
+        # 这时入参是加过遮罩的 `临时[[T0]][[T1]]俯视图`。如果照样还原遮罩，
+        # 图纸上就出现 `临时 BARRICADE RACK 俯视图` 这种半中半英的东西，
+        # 比完全不翻更糟：客户会以为工具把句子译坏了。
+        # 判据是「输出和送去翻译的完全一致」= 没动过，这时还原原文。
+        fixed = []
+        for raw, m, pairs in zip(results, masked, metas):
+            r = raw or ""
+            if r.strip() and r.strip() != m.strip():
+                r = self._unmask_locked(r, pairs)
+            else:
+                r = ""
+            fixed.append(r)
+        results = fixed
         converted = 0
         for i, (raw, hint) in enumerate(items):
             out = results[i]

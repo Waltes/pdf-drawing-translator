@@ -977,6 +977,37 @@ def _merge_split_labels(cands, gap_em=0.6, row_em=0.35):
     return out
 
 
+def _fix_ink_for_slanted(text, ink_h, rect):
+    """
+    斜排文字的墨迹高修正：按框宽反推真实字高。
+
+    OCR 给的框是轴对齐包围盒。斜着写的标注，纵向尺寸是对角线撑出来的，
+    比真实字高大得多 —— 实测 `ø32*2mm圆管` 沿斜管写，墨迹量出 47.5，
+    同页真标题才 36.8。拿它算字号会写出 38pt 的大字，一条标注折成三行
+    堆在图形上方，比不翻还难看。
+
+    判据两条一起用，缺一条都会误伤：
+      · 框的宽高比在 1.0~3.0。斜排的字横向还是铺开的（实测 1.47、1.49），
+        竖排（`125mm`、`1103mm` 那种）宽高比不到 0.5，绝不能进这里 ——
+        它们的墨迹高是真的，按宽度反推会把尺寸字砍掉一半。
+      · 按墨迹高算，这串字水平排开该有的宽度，框宽连六成都不到。
+        正常横排文字这条不会命中（实测 3.7~9.1 倍的宽高比，远高于阈值）。
+
+    命中就用「框宽 ÷ 每单位墨迹高的横向宽度」反推墨迹高。
+    """
+    s = text or ""
+    if not s or ink_h <= 0 or rect.height <= 0 or rect.width <= 0:
+        return ink_h
+    ratio = rect.width / rect.height
+    if not (1.0 < ratio < 3.0):
+        return ink_h
+    wide = sum(1 for ch in s if typography.is_wide(ch))
+    per_ink = wide * 0.95 + (len(s) - wide) * 0.55
+    if per_ink <= 0 or rect.width >= ink_h * per_ink * 0.6:
+        return ink_h
+    return max(typography.MIN_SIZE, rect.width / per_ink)
+
+
 def process_page_images(page, translate_fn, used_rects, report,
                         translate_batch=None, untranslated=None,
                         force_full=False, write_marks=None, fixes=None):
@@ -1098,7 +1129,9 @@ def process_page_images(page, translate_fn, used_rects, report,
                     hint = ocr_lang(text)
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
                                "fg": fg, "hint": hint, "vertical": vertical,
-                               "ink_h": _ink[0], "ink_box": _ink[1]})
+                               "ink_h": _fix_ink_for_slanted(text, _ink[0],
+                                                             txt_rect),
+                               "ink_box": _ink[1]})
 
     if not candidates:
         return 0
@@ -1169,12 +1202,17 @@ def process_page_images(page, translate_fn, used_rects, report,
     # v1.1.7：标出哪些是「对着图形居中」的标题。也要在排版之前做完 ——
     # 它决定译文往哪边长（绕重心对称长，还是一头固定往另一头伸）。
     # 放在归类和占用图之后：判据要用到实测字高和页面占用情况。
-    # 严格模式也跳过：客户要左对齐，重心对齐会把左端推走（实测偏了 25~29mm）。
-    if not edition.strict_layout():
-        try:
-            _assign_align(page, candidates, space)
-        except Exception:
-            pass
+    #
+    # 严格模式也要跑（2026-11-19 客户反馈「标题没有居中」）：
+    #   全部左对齐的结果是标题向右长，重心被推走。但这条判据自带两道关
+    #   （字号须是本页最大档的 85% 以上 + 原框中心与图形中心差半字高内），
+    #   标注根本进不来，只有视图标题会被标 center。
+    #   标注仍然左对齐 —— 客户 11-18 要的「左对齐」说的是标注，不是标题。
+    try:
+        _assign_align(page, candidates, space,
+                      by_size_only=edition.strict_layout())
+    except Exception:
+        pass
 
     plans = []
     for c, out in zip(candidates, outs):
@@ -1188,6 +1226,13 @@ def process_page_images(page, translate_fn, used_rects, report,
     # 严格模式跳过：这一步会改已定稿的字号，与「字号锁死」直接冲突。
     if not edition.strict_layout():
         _align_class_sizes(plans)
+    else:
+        # 严格模式只对「居中的标题」收口，其余一律不碰。
+        # 理由：标题是同一页里成套出现的（底座平面图 / 底座侧面图），
+        # 客户看到的是「两个标题是不是一样大」。字号由各自源字高反算，
+        # 同高不同字组合反算出来会差几个点（实测 28.67 / 30.40，5.7%），
+        # 并排放着能看出来。标注不做这一步 —— 每条都跟自己的原文对齐。
+        _align_center_sizes(plans)
 
     # 复核重译要用的登记记录：每个候选都记一条，写成的带上译文，
     # 没写成的记 None —— 后者正是「空白块 / 未译」的打回对象，
@@ -1608,13 +1653,53 @@ def _plan_strict(c, out, font, want_ink, fill, space, untranslated):
         5. 还不行 —— 缩字号重来。绝不保留原文：客户要的是译文
     """
     r = c["rect"]
+    centered = (c.get("align") == "center")
     base_size = typography.size_for_ink(font, out, want_ink)
+
+    # 居中标题：先按宽度上限压字号，再按源框中心对齐。
+    #
+    # 为什么标题要单独处理（客户 2026-11-19 的原话「标题字体偏大，也没有居中」）：
+    #   左端锚死在源框 x0 上，英文比中文长两三倍，多出来的部分全部往右长，
+    #   重心被推走一半增量 —— 实测两个视图标题的中心一个 493、一个 472，
+    #   同一页的两个标题都不在同一条竖线上，更不在图形中心。
+    #   字号上，折减后 pt 数字是对的（38.28→30.68），但宽度是源的 2~2.5 倍，
+    #   占了半个图幅，客户看到的就是「标题太大了」。
+    # 所以标题走另一套：宽度不超过源宽 TITLE_W_MAX 倍（超了缩字号），
+    # 位置按源框中心对称展开，左右各长一半。
+    if centered:
+        cap_w = r.width * typography.TITLE_W_MAX
+        w0 = font.text_length(out, fontsize=base_size)
+        if cap_w > 0 and w0 > cap_w:
+            base_size = max(typography.MIN_SIZE, base_size * cap_w / w0)
     base = r.y1 - base_size * typography.DESCENDER      # 原基线
+    cx = (r.x0 + r.x1) / 2.0                            # 源框中心
 
     if space is None:
         width = font.text_length(out, fontsize=base_size)
+        x0 = cx - width / 2.0 if centered else r.x0
         return (c, out, fill, base_size, font, None, False,
-                _box_from(r.x0, base, base_size, width, 1))
+                _box_from(x0, base, base_size, width, 1))
+
+    if centered:
+        # 居中的标题不折行、不右延：缩字号保证单行写完，两侧对称。
+        # 折行的标题会变成上下两截，居中与否都失去意义。
+        size = base_size
+        for _ in range(10):
+            width = font.text_length(out, fontsize=size)
+            b = r.y1 - size * typography.DESCENDER
+            box = _box_from(cx - width / 2.0, b, size, width, 1)
+            if space.is_clear(box, ignore=fill):
+                space.reserve(box)
+                return (c, out, fill, size, font, None, False, box)
+            if size * 0.9 < typography.MIN_SIZE:
+                break
+            size *= 0.9
+        # 压到最小也躲不开障碍：仍然按中心写，如实记一笔偏小
+        width = font.text_length(out, fontsize=typography.MIN_SIZE)
+        b = r.y1 - typography.MIN_SIZE * typography.DESCENDER
+        box = _box_from(cx - width / 2.0, b, typography.MIN_SIZE, width, 1)
+        space.reserve(box)
+        return (c, out, fill, typography.MIN_SIZE, font, None, True, box)
 
     # 这一条往右还有多少空地：以译文实际占的高度带为准，不是以原框为准 ——
     # 英文的字面高度和中文不一样，用原框高度去探，探出来的边界会偏。
@@ -1629,7 +1714,8 @@ def _plan_strict(c, out, font, want_ink, fill, space, untranslated):
         if os.environ.get("PT_DEBUG"):
             import sys as _sys
             print(f"[strict] sz={size:5.2f} w={width:6.1f} room={room:6.1f} "
-                  f"x0={r.x0:6.1f} base={base:6.1f} {out[:34]!r}", file=_sys.stderr)
+                  f"x0={r.x0:6.1f} base={base:6.1f} ctr={centered} "
+                  f"{out[:34]!r}", file=_sys.stderr)
         # 1) 单行，左端锁死，原框内就放得下
         box = _box_from(r.x0, base, size, width, 1)
         if width <= room and space.is_clear(box, ignore=fill):
@@ -1657,6 +1743,45 @@ def _plan_strict(c, out, font, want_ink, fill, space, untranslated):
     box = _box_from(r.x0, base, typography.MIN_SIZE, width, 1)
     space.reserve(box)
     return (c, out, fill, typography.MIN_SIZE, font, None, True, box)
+
+
+def _align_center_sizes(plans):
+    """
+    把同一页的居中标题拉到同一个字号（严格模式专用）。
+
+    只动 `align == "center"` 且单行写完的那几条。字号取本页居中标题里
+    **最小的那个**，只往相近的（±25% 以内）拉 —— 差得远的说明级别不同
+    （主标题 / 副标题），不是一个套系，不该拉平。
+
+    为什么取最小而不是中位数：每条在 _plan_strict 里都已经过了
+    TITLE_W_MAX 的宽度上限。拉齐时如果把小的往上推，推上去的那条宽度
+    就重新超限了（实测 28.67→30.40 后倍数从 1.85 变 1.97）。取最小
+    等于只用已经验证过装得下的那个值，往上推的风险直接没有。
+
+    为什么只拉标题：标注每条都要跟自己的原文一样大，拉平就违背了
+    「字号锁死」。标题不一样 —— 客户看的是「这两个标题是不是一样大」，
+    实测两个同源字高的标题反算出来差 5.7%，并排放在一页上看得出来。
+    """
+    grp = [p for p in plans if p[0].get("align") == "center" and p[5] is None]
+    if len(grp) < 2:
+        return
+    sizes = sorted(p[3] for p in grp)
+    mid = sizes[0]
+    if mid <= 0:
+        return
+    keep = {id(p[0]) for p in grp
+            if abs(p[3] - mid) / mid <= 0.25 and abs(p[3] - mid) > 0.05}
+    if not keep:
+        return
+    for i, p in enumerate(plans):
+        if id(p[0]) not in keep:
+            continue
+        c, out, fill, size, font, lines, small, box = p
+        w = font.text_length(out, fontsize=mid)
+        cx = (c["rect"].x0 + c["rect"].x1) / 2.0
+        base = c["rect"].y1 - mid * typography.DESCENDER
+        plans[i] = (c, out, fill, mid, font, lines, small,
+                    _box_from(cx - w / 2.0, base, mid, w, 1))
 
 
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
@@ -1968,7 +2093,7 @@ def _content_center(rects, r, ink, space=None):
     return None
 
 
-def _assign_align(page, candidates, space=None):
+def _assign_align(page, candidates, space=None, by_size_only=False):
     """
     标出哪些文字是「对着图形居中」的，供 _candidates 决定往哪边长。
 
@@ -1999,8 +2124,20 @@ def _assign_align(page, candidates, space=None):
         if c.get("vertical"):
             continue
         ink = c.get("ink_h") or c["rect"].height * 0.72
-        if ink > 0:
-            ink_of[id(c)] = ink
+        if ink <= 0:
+            continue
+        # 斜排文字要排除：OCR 框是轴对齐包围盒，斜着写的字墨迹高度被
+        # 对角尺寸撑大。实测 `ø32*2mm圆管` 沿斜管写，ink 量出 47.5，
+        # 比同页真标题的 36.8 还大 —— 它当了「本页最大字号档」，
+        # 真标题就被 0.85 那一关挡在外面，两个视图标题一条都标不上居中。
+        # 判法：按墨迹高算这串字水平排开该有多宽，框宽连一半都不到，
+        # 那只能是被旋转过（或竖排漏标了 vertical）。
+        wide = sum(1 for ch in c["text"] if typography.is_wide(ch))
+        other = len(c["text"]) - wide
+        need = wide * ink * 0.95 + other * ink * 0.55
+        if need > 0 and c["rect"].width < need * 0.55:
+            continue
+        ink_of[id(c)] = ink
     if not ink_of:
         return
     top_ink = max(ink_of.values())
@@ -2013,6 +2150,18 @@ def _assign_align(page, candidates, space=None):
     for c in candidates:
         ink = ink_of.get(id(c))
         if not ink or ink < top_ink * typography.CENTER_MIN_REL:
+            continue
+        if by_size_only:
+            # 严格模式（定制版）：本页最大字号档就是标题，直接标居中。
+            #
+            # 为什么不用下面那套几何判据（客户 2026-11-19 报「标题没有居中」时实测）：
+            #   _content_center 要在标题下方一带把矢量图元求并集，取并集中心当
+            #   「图形中心」。这份图纸一页有近三千个图元、横向窗口只覆盖标题宽
+            #   左右各一格，左侧图元被窗口切掉，并集中心偏了 85pt（真值 326.7，
+            #   它给 241.6），标题被判成「不居中」。
+            #   而「标题居中」根本不需要知道图形中心在哪 —— 源框中心就是它该有
+            #   的中心，译文保持这个中心、向两侧对称生长即可。少猜一步，少错一处。
+            c["align"] = "center"
             continue
         r = c["rect"]
         center = _content_center(rects, r, ink, space)
