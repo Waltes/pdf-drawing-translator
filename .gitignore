@@ -89,3 +89,8 @@ packaging/_version_info_build.txt
 
 # 压测产物：每轮一份完整 PDF + 明细日志，只在本机看，不进仓库
 _stress/
+
+# 批量测试产物：每份图纸的完整译文 + 明细日志，只在本机看
+_batch/
+_survey/
+_ed_bak.json

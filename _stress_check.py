@@ -20,6 +20,9 @@ LONE = re.compile(r"^[\s\.,;:：，。、；！？'\"\-–—()（）*×]+$")
 # 直径符号的替代写法：⌀(U+2300) / ∅(U+2205)。西文字体普遍没有这两个字形，
 # 写入时会回退到别的字体，同一张图上出现两种直径字形（1.1.4 实测第 2 页 3 处）。
 DIA = re.compile("[\u2300\u2205]")
+# 英译中时「没被翻译的英文整句」：连续 3 个以上英文单词才算。
+# 单个词（BR-01 / Ø32 / ft / sq）在中文图纸里是正常的型号与单位，不能报。
+EN_SENT = re.compile(r"(?:[A-Za-z][A-Za-z\-'’]*\s+){2,}[A-Za-z][A-Za-z\-'’]*")
 TINY_PT = 8.0
 
 
@@ -58,12 +61,18 @@ def _area(a):
     return max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
 
 
-def check(pdf_path):
-    """返回体检结果字典。"""
+def check(pdf_path, dst="en"):
+    """返回体检结果字典。
+
+    dst="en" 中译英：查汉字残留、英文禁用叫法、直径符号写法
+    dst="zh" 英译中：查「没被翻译的英文句子」，禁用叫法与汉字残留不适用
+    """
     doc = pymupdf.open(pdf_path)
     spans = _spans(doc)
     res = {
-        "zh": [],          # 中文残留
+        "zh": [],          # 中文残留（仅 dst=en 有意义）
+        "en": [],          # 未翻译的英文整句（仅 dst=zh 有意义）
+        "en_word": [],     # 零散英文词（型号/单位属正常，只作参考不判失败）
         "banned": [],      # 禁用叫法
         "dbl": [],         # 重复标点
         "lone": [],        # 孤立标点
@@ -80,12 +89,20 @@ def check(pdf_path):
             res["zh"].append((sp["page"], t))
         if DIA.search(t):
             res["dia"].append((sp["page"], t))
-        up = t.upper()
-        for w in BANNED:
-            # 整词匹配，避免 "PALLETIZED" 之类误报也放过 —— 这里就要严
-            if re.search(r"\b%s\b" % w, up):
-                res["banned"].append((sp["page"], t, w))
-                break
+        # 英译中：整句英文没动，才算漏译。HOLD 之类全大写缩写不参与单词计数
+        if dst == "zh" and not HAN.search(t):
+            m = EN_SENT.search(t)
+            if m and len(re.sub(r"[^A-Za-z]", "", m.group(0))) >= 10:
+                res["en"].append((sp["page"], t))
+            elif re.search(r"[A-Za-z]{4,}", t):
+                res["en_word"].append((sp["page"], t))
+        if dst == "en":
+            up = t.upper()
+            for w in BANNED:
+                # 整词匹配，避免 "PALLETIZED" 之类误报也放过 —— 这里就要严
+                if re.search(r"\b%s\b" % w, up):
+                    res["banned"].append((sp["page"], t, w))
+                    break
         if DBL_PUNCT.search(t):
             res["dbl"].append((sp["page"], t))
         if LONE.match(t):
@@ -133,15 +150,20 @@ def check(pdf_path):
 def failed(res):
     """判定：这些项必须为 0 才敢交付。empty_pages 不算失败（原图可能真没字）。"""
     return {k: v for k, v in res.items()
-            if k in ("zh", "banned", "dbl", "lone", "oob", "overlap", "tiny", "dia")
+            if k in ("zh", "en", "banned", "dbl", "lone", "oob", "overlap", "tiny", "dia")
             and v}
 
 
 if __name__ == "__main__":
-    r = check(sys.argv[1])
-    print("页数 %d / span %d" % (r["pages"], r["n_spans"]))
-    for k in ("zh", "banned", "dbl", "lone", "oob", "overlap", "tiny", "dia"):
+    dst = sys.argv[2] if len(sys.argv) > 2 else "en"
+    r = check(sys.argv[1], dst)
+    print("语言方向 %s | 页数 %d / span %d" % (dst, r["pages"], r["n_spans"]))
+    for k in ("zh", "en", "banned", "dbl", "lone", "oob", "overlap", "tiny", "dia"):
         print("%-8s %d" % (k, len(r[k])))
         for item in r[k][:10]:
+            print("    ", item)
+    if r["en_word"]:
+        print("零散英文词（参考）%d" % len(r["en_word"]))
+        for item in r["en_word"][:8]:
             print("    ", item)
     print("整页无字", r["empty_pages"])

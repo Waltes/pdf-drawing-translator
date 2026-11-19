@@ -1591,6 +1591,10 @@ class Translator:
                 "letter, digit or punctuation mark: ⌀ Ø ø φ is diameter, R is radius, ± is "
                 "tolerance, ° is degree, × is the times sign, □ is square, ▽ is surface finish, "
                 "①② are item numbers. Writing ø as @, ° as o, × as x or ± as + ruins the drawing.\n"
+                "5c. Personal names, company names and brand names are copied verbatim — never "
+                "transliterate or translate them (Milan Lülsdorf stays Milan Lülsdorf, HYROX "
+                "stays HYROX). The role word around a name is still translated "
+                "(Drawn by: becomes 制图：).\n"
                 "6. In Chinese, \"寸\" used for pipes is a nominal size, not inches — write DN25, "
                 "DN32, DN40, DN50, DN80, DN100 for 1, 1.2, 1.5, 2, 3, 4 寸.\n"
                 "7. Do not leave words from the source language in the output (part numbers, units, "
@@ -1627,6 +1631,9 @@ class Translator:
             "或标点：⌀ Ø ø φ 是直径，R 是半径，± 是公差，° 是角度，× 是乘号，"
             "□ 是方形，▽ 是表面粗糙度，①② 是序号。"
             "把 ø 写成 @、把 ° 写成 o、把 × 写成 x、把 ± 写成 +，图纸就报废了。\n"
+            "5c. 人名、公司名、品牌名原样照抄，不许音译、不许意译、不许翻译"
+            "（Milan Lülsdorf 就是 Milan Lülsdorf，不要写成米兰·吕尔斯多夫；"
+            "HYROX 就是 HYROX）。人名后面跟的职务照常翻（Drawn by: 译成「制图：」）。\n"
             "6. 中文里的「寸」用在管材（钢管、方管、圆管）上是俗称，不是英寸，"
             "要按公称直径写：1寸=DN25、1.2寸=DN32、1.5寸=DN40、2寸=DN50、3寸=DN80、4寸=DN100。"
             "这种地方写 DN 口径，不要写换算出来的毫米数。\n"
@@ -1641,7 +1648,6 @@ class Translator:
             "approximately→approx.。缩写只用于普通名词，型号、材料牌号、标准号照抄不缩。\n"
             "10. 只输出 JSON，不要任何解释文字。\n"
             "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
-
     def _edition_rule(self):
         """
         定制版追加到系统提示词的段落：行业标签 + 客户指定的叫法。
@@ -2094,31 +2100,51 @@ class Translator:
         同制内的换写法也放行：原文「2.79米」，译文「2790 mm」是对的，
         但逐字比对找不到 2.79。少了这条例外，中→英图纸里所有以「米」
         标注的长边（2.79米、1.103米……）都会被判算错数、原样退回中文。
+
+        2026-11-19 修：两套写法任一成立即通过。
+        原逻辑把原文换算成公制后**只**认公制数字，于是模型保留「8英尺」
+        的译文一律判失败。实测 BR-01 第 1 页那段说明：模型译得完全正确
+        （「8英尺围栏用9英尺方管……」），只因没把英尺换成毫米就被丢掉，
+        图上退回英文原文；重译时提示词又要求「单位与原文一致」，
+        模型继续保留英尺 —— 死锁，重译多少次都翻不出来。
+        现在原文写法与换算后写法各验一遍：模型保留英制时后面有
+        convert_to_metric 兜底换算，不存在「不换算就混过去」；
+        而算错数的（4-1/8" 写成 100mm）两套都对不上，照样被拦。
         """
-        if src:
-            if self.unit_mode == UNIT_METRIC and has_imperial(src):
-                src = convert_to_metric(src)
-            elif self.unit_mode == UNIT_IMPERIAL and has_metric(src):
-                src = convert_to_imperial(src)
-        nums = NUM_RE.findall(src or "")
-        if not nums:
+        if not src:
             return True
-        # 原文里带公制单位的数值 → 它在各公制单位下的等值。只在这条判定里用。
-        equiv = self._same_unit_equiv(src)
-        for n in nums:
-            if n in out:
-                continue
-            # 允许 4-1/8 被写成 4-1/8 或 4 1/8，宽松匹配数字主体
-            if n.replace("-", " ") in out.replace("-", " "):
-                continue
-            # 纯数值的近似比对（应对小数位写法差异）
-            if self._num_close(n, out):
-                continue
-            # 同制换写法：2.79米 写成 2790mm 是正确表达，不是算错数
-            if self._unit_equiv_hit(equiv.get(n), out):
-                continue
-            return False
-        return True
+        # 两套待验写法：原文本身 / 按当前输出单位换算后
+        variants = [src]
+        conv = src
+        if self.unit_mode == UNIT_METRIC and has_imperial(src):
+            conv = convert_to_metric(src)
+        elif self.unit_mode == UNIT_IMPERIAL and has_metric(src):
+            conv = convert_to_imperial(src)
+        if conv != src:
+            variants.append(conv)
+
+        def _all_in(v):
+            """v 里的每个数字都要在译文里找得到（含同制换写法的容差）。"""
+            nums = NUM_RE.findall(v or "")
+            if not nums:
+                return True
+            equiv = self._same_unit_equiv(v)
+            for n in nums:
+                if n in out:
+                    continue
+                # 允许 4-1/8 被写成 4-1/8 或 4 1/8，宽松匹配数字主体
+                if n.replace("-", " ") in out.replace("-", " "):
+                    continue
+                # 纯数值的近似比对（应对小数位写法差异）
+                if self._num_close(n, out):
+                    continue
+                # 同制换写法：2.79米 写成 2790mm 是正确表达，不是算错数
+                if self._unit_equiv_hit(equiv.get(n), out):
+                    continue
+                return False
+            return True
+
+        return any(_all_in(v) for v in variants)
 
     def _is_clean(self, out, src, dst):
         """
@@ -2335,20 +2361,56 @@ class Translator:
         # 另外不能用「结果里还有占位符」当失败判据：模型保留占位符是正常
         # 行为（实测 `Temporary [[T1]] [[T0]] Top view`），那条要还原而不是丢掉。
         _cjk = re.compile(r"[\u4e00-\u9fff]")
+        # 「有实词」的判据：出现 2 个字母以上的英文词，且不是单位/图纸缩写。
+        #
+        # 为什么需要它（2026-11-19 多份客户图纸实测）：
+        #   上面那条只判「中文原样退回」，英文原样退回是漏的。
+        #   BR-01 第 1 页整段说明 `A 9 ft square tube for 8 ft fence...`
+        #   被模型原样退回，程序当成翻译成功，接着单位换算又把 9 ft 改成
+        #   2743.20mm —— 客户图上留下一段「英文句子 + 公制数值」的半成品，
+        #   比不翻更糟：数字被动过，语言没动，谁都看不出哪一版是原稿。
+        #   SledBox 页脚的 `Version Date: 16.12.2025` 同一条路径。
+        #
+        # 白名单是「本来就该原样保留」的：纯单位与图纸缩写。
+        # `25 lb`、`ø12mm`、`1-1/2" sq` 这类原样退回是正确行为，
+        # 不能判失败 —— 1.1.4 就是因为一刀切判「输出==入参」，
+        # 把 `4"`、`25 lb` 清空过，图上留下没有单位的空格。
+        _KEEPV = {"lb", "ft", "in", "mm", "cm", "kg", "pcs", "pc", "sq", "thk",
+                  "dia", "od", "id", "qty", "rev", "typ", "ref", "std", "min",
+                  "max", "galv", "ss", "ms", "mm2", "mm3", "m2", "m3"}
+
+        def _has_words(s):
+            """这句原文里有没有「本该翻译」的实词。"""
+            for w in re.findall(r"[A-Za-z]{2,}", s or ""):
+                if w.lower() not in _KEEPV:
+                    return True
+            return False
+
         fixed = []
         for raw, m, pairs in zip(results, plain, metas):
             r = raw or ""
             if r.strip() and r.strip() != m.strip():
                 r = self._unmask_locked(r, pairs)
-            elif r.strip() and _cjk.search(m):
-                r = ""            # 中文原样退回 = 这条没翻成
+            elif r.strip() and (_cjk.search(m) or _has_words(m)):
+                r = ""            # 原样退回且原文有实词 = 这条没翻成
             fixed.append(r)
         results = fixed
         converted = 0
         for i, (raw, hint) in enumerate(items):
             out = results[i]
             if not out:
-                continue
+                # 纯尺寸标注（7/8"、4-1/8"）翻不出来是常事：模型认为它不需要翻，
+                # 原样退回被判失败。但这种条目**单位还是得换** ——
+                # 2026-11-19 实测 BR-01 第 4、5 页：同一张图上 7/8" 和 104.78mm
+                # 并存，因为这几条数字翻失败就把换算一起跳过了。
+                # 判据用「没有可译实词」，免得把整句英文也当尺寸直接换算。
+                if (self.unit_mode == UNIT_METRIC and has_imperial(raw)
+                        and not _has_words(raw)):
+                    out = convert_to_metric(raw)
+                    results[i] = out
+                    converted += 1
+                else:
+                    continue
             new = out
             # 注意：这里**不能**因为「这条不用翻译」就跳过换算。
             # 「英文图纸输出英文、只把英寸换成毫米」是完全合理的用法
