@@ -94,3 +94,6 @@ _stress/
 _batch/
 _survey/
 _ed_bak.json
+
+# 竖排效果验证产物（模拟图、对比裁图）
+_vert/

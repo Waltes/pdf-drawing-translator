@@ -756,6 +756,10 @@ _HAS_CJK = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff]")
 # （R5 半径、M8 螺纹、H7 公差、A 剖切位置），没有一个是「词」，
 # 送去翻译只会被改写。两个以上才算真有词（DN、THK、QTY、Panel）。
 _HAS_LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
+# 裸单位/图纸缩写：单独出现时没有可译内容（mm、THK、QTY……原文怎么排就怎么排）
+_UNIT_WORD = re.compile(
+    r"^(?:mm|cm|km|kg|mg|lb|lbs|ft|in|yd|pcs|pc|sets?|thk|dia|od|id|qty|"
+    r"rev|typ|ref|std|matl|pcs\.)$", re.I)
 
 
 def needs_translation(text):
@@ -779,4 +783,11 @@ def needs_translation(text):
     s = _NUM_UNIT_TOK.sub(" ", s)
     s = _PLAIN_NUM.sub(" ", s)
     s = _NON_WORD.sub(" ", s)
+    # 裸单位（前面没有数字的 mm、THK、QTY 这类）：OCR 会把标注末尾的单位
+    # 单独切出来成一条，模型原样返回，于是被记进漏译清单。
+    # 实测斜撑底座图纸第 1 页就有一条孤零零的「mm」上了清单 —— 那行字图上
+    # 本来就没有可译内容，报它是给客户添乱。
+    toks = [t for t in s.split() if t]
+    if toks and all(_UNIT_WORD.match(t) for t in toks):
+        return False
     return bool(_HAS_CJK.search(s) or _HAS_LATIN_WORD.search(s))

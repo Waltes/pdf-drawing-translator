@@ -1963,13 +1963,20 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     #   英文标注普遍比中文窄也比中文矮，不再乘 1.08 补观感 —— 那一条是
     #   在没有墨迹高度时的权宜之计，现在有了真实高度，补就成了放大。
     if vertical:
-        want_ink = glyph_h_hint or (r.width * 0.85)
-    else:
-        want_ink = glyph_h_hint or (r.height * 0.85)
+        # 竖排走单独一条路（2026-11-19 客户定）：竖排的两头是被夹住的 ——
+        # 上面是尺寸线端点、图框线或上一条标注，下面是同样一帮东西，
+        # 所以它没有「往右长」这个选项，只有一件事要做：量出这条竖带
+        # 上下还能占多长，把字号缩到刚好装下。横排那套「原位+向右延伸+
+        # 折行」在十几点宽的竖带里全是废动作。
+        #
+        # 注意不能把 glyph_h_hint 传进去：竖排的 ink_h 量的是沿轴向的长度
+        # （这份图纸 84pt），不是字高。字高由 _plan_vertical 自己按列宽算。
+        return _plan_vertical(c, out, font, fill, space, untranslated)
+    want_ink = glyph_h_hint or (r.height * 0.85)
 
     # 定制版走严格原位（字号锁死、位置锁死、只许向右长、放不下才折行）。
     # 通用版保持下面那套「同类同字号 + 重心对齐 + 四轮落点搜索」不动。
-    if edition.strict_layout() and not vertical:
+    if edition.strict_layout():
         return _plan_strict(c, out, font, want_ink, fill, space, untranslated)
 
     # ---- 有占用图时：先看哪儿能放，再定字号 ----
@@ -2129,6 +2136,174 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
     # 第八项 place：真正落笔的矩形。没有占用图时就是原框；
     # 有占用图时可能被加宽或上下挪了一行，落笔必须按它来，不能还按原框。
     return (c, out, fill, size, font, lines, size < soft, r)
+
+
+def _span_from(space, x0, x1, edge, direction, limit, ignore):
+    """
+    从 edge 这条边出发、朝 direction 方向能连续空出多少点。
+
+    direction = -1 向上，+1 向下。探针是「从 edge 一路铺过来的整块矩形」，
+    不是只探边上的薄薄一条 —— 竖排译文要占的是整列高度，中间哪一段被
+    尺寸线端点、剖面线挡住，那一段就用不了，必须整块一起判。
+
+    space 为 None（没有占用图）时返回 0：宁可按原框缩字号，也不要凭空调
+    出一段其实压着别人的区域。这条退路是有意的。
+    """
+    if space is None or limit <= 0:
+        return 0.0
+
+    def ok(t):
+        y0 = edge - t if direction < 0 else edge
+        y1 = edge if direction < 0 else edge + t
+        return space.is_clear(pymupdf.Rect(x0, y0, x1, y1),
+                              ignore=ignore, pad=0.0)
+
+    # 先按 2pt 一档往外推，找到第一档不通的位置
+    best, t = 0.0, 2.0
+    while t <= limit:
+        if not ok(t):
+            break
+        best, t = t, t + 2.0
+    # 再二分到 0.25pt，把「差一点」的那几档也吃掉
+    lo, hi = best, min(best + 2.0, limit)
+    while hi - lo > 0.25:
+        mid = (lo + hi) / 2.0
+        if ok(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _glyph_column(space, ink, ignore=None):
+    """
+    在 ink 的横向范围里剔掉贴着字的那条竖线，返回真正装字的那一条列。
+
+    为什么必须剔：竖排标注右侧往往紧贴着尺寸线或图框线，那条线会落进
+    OCR 框和墨迹框里。拿带线的框去探上下空间，第一档就被自己的线挡住
+    （实测 up=0.5 / down=0.5，等于一个字都长不出去）；拿它当字高，
+    会把 11pt 的字算成 13.3pt。
+
+    判据不按「列里有多少墨」算 —— 试过，不成立：1pt 宽的尺寸线落在
+    0.6pt 宽的探条里，占用率只有 0.5，跟汉字的竖笔画分不开。
+    改成更直接的判据：**这一列正上方（或正下方）出去 3pt 是不是空白**。
+    字的列上方是空的，压着线的那一列上方立刻就是线。
+
+    收不动（上下都挨着别的标注，两条都不是线）时按已收的结果返回，
+    不硬收到没有宽度 —— 收窄一列只会让字小一点，收没了就写不进去。
+    """
+    if space is None:
+        return ink.x0, ink.x1
+    lo, hi = ink.x0, ink.x1
+
+    def clear_above_below(x0, x1):
+        for y in (ink.y0 - 4.0, ink.y1 + 1.0):
+            try:
+                if space.is_clear(pymupdf.Rect(x0, y, x1, y + 3.0),
+                                  ignore=ignore, pad=0.0):
+                    return True
+            except Exception:
+                return True
+        return False
+
+    n = 0
+    while hi - lo > 3.0 and n < 16 and not clear_above_below(lo, hi):
+        hi -= 0.5
+        n += 1
+    n = 0
+    while hi - lo > 3.0 and n < 16 and not clear_above_below(lo, hi):
+        lo += 0.5
+        n += 1
+    return lo, hi
+
+
+def _plan_vertical(c, out, font, fill, space, untranslated):
+    """
+    竖排标注的排版：沿轴向缩字号，装进上下界限为止。
+
+    为什么单独一条路（2026-11-19 客户定，托盘图纸实测）：
+      横排的方案是「原位 + 向右延伸 + 放不下才折行」。竖排没有横向空间 ——
+      字身宽度就是一个字高（实测 11pt 左右），右边紧贴着尺寸线；它唯一的
+      自由度在长度方向，而长度方向两头都被夹死：上到尺寸线端点、下到下一条
+      标注。所以竖排只有一个动作：把字号缩到「译文长度 = 上下可用长度」。
+
+    改之前的行为（1.1.5 及以前）：竖排落到通用分支，可排长度直接取 OCR 框
+    高度，译文长两倍就判「缩到可读下限以下」并留原文。托盘图纸那两条
+    「贴上橡胶垫后983mm」就是这么整块留在图上的 —— 原文 83pt，译文按原字高
+    要 176pt，硬塞进 83pt 要 4.5pt，低于 5.5pt 的地板，于是放弃。
+
+    现在先量真实界限：原字上下各有 55pt 空白（到尺寸线端点），一共 193pt，
+    176pt 装得下，字号一点不用缩。
+
+    只在缩到硬下限（3.5pt）还装不下时，才退回「写不出、报未译」。
+
+    另有两个坑，都是这份图纸上踩出来的：
+      · 竖排的 ink_h 量的是「沿轴向的长度」（84pt），不是字高 —— 字高是
+        横跨方向的列宽。拿它当字高会算出 69pt 的字（实测）。
+      · OCR 框右侧压着尺寸线，那条线会污染墨迹框：既挡住上下探测，
+        又把字高算大。见 _glyph_column。
+    """
+    r = c["rect"]
+    ink = c.get("ink_box")
+    if ink is None or ink.is_empty or ink.height < r.height * 0.35:
+        ink = r
+
+    col_x0, col_x1 = _glyph_column(space, ink, ignore=fill)
+    # 字高 = 跨列宽度（不是沿轴长度），这才是「原字多高」在竖排里的对应物
+    glyph_h = max(col_x1 - col_x0, 1.0)
+    # 盖字框必须重算：上游给的 fill 是照墨迹框外扩的，而墨迹框把右侧那条
+    # 尺寸线一起框进来了（实测 ink.x1=74.3，线在 73.7~74.1）。直接用它盖，
+    # 会在尺寸线上啃出一个和字一样长的缺口 —— 图上看到的就是「线断了一截」。
+    # 这里按剔掉线之后的那条列重新给框，右侧只留 0.2pt 余量。
+    vfill = pymupdf.Rect(col_x0 - 0.6, ink.y0 - 0.6, col_x1 + 0.2, ink.y1 + 0.6)
+
+    # 上限给 400pt：A3/A2 图纸上单条竖排标注再长也到不了这个数，
+    # 真到了说明这一列上下全是空白，让它长就是，占用图会兜住。
+    LIMIT = 400.0
+    up = _span_from(space, col_x0, col_x1, ink.y0, -1, LIMIT, vfill)
+    down = _span_from(space, col_x0, col_x1, ink.y1, +1, LIMIT, vfill)
+    avail = ink.height + up + down
+
+    size = typography.size_for_ink(font, out, glyph_h)
+    need = font.text_length(out, fontsize=size)
+    if os.environ.get("PT_DEBUG_V"):
+        import sys as _s
+        print("[vert] col=%.1f~%.1f 字高%.1f avail=%.1f(上%.1f/下%.1f) need=%.1f size=%.2f"
+              % (col_x0, col_x1, glyph_h, avail, up, down, need, size), file=_s.stderr)
+    if avail <= 0 or need <= 0:
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
+    if need > avail:
+        # 按比例缩：长度与字号成正比，一次除法就够，不用二分。
+        # 乘 0.998 是留浮点余量 —— 算出来正好等于 avail 时，text_length
+        # 再算一遍常常多出 1e-13，随即被判「还差一点」而整条放弃。
+        size = max(size * avail / need * 0.998, typography.MIN_SIZE)
+        need = font.text_length(out, fontsize=size)
+    if need > avail + 0.05:
+        # 缩到硬下限还装不下：与其把字压成一道灰线，不如留原文并如实报出
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
+    # 落点：在「原字 + 上下借到的空白」这一整段里居中，视觉重心与原件一致。
+    # 只往上或只往下长的写法试过，会一头顶到尺寸线箭头上。
+    mid = (ink.y0 - up + ink.y1 + down) / 2.0
+
+    # 横向：英文的字身比汉字窄，别让它贴着右边的尺寸线写。
+    # 把字身摆进原来那条列里居中 —— 基线在右、字身往左长，下伸部伸出基线
+    # 0.22 字高，所以基线还要再往里让一点，否则 g、p 会压到线上。
+    body = size * typography.ink_ratio(font, out)
+    base_x = col_x1 - max(0.0, (glyph_h - body)) / 2.0 - size * typography.DESCENDER
+    base_x = max(base_x, col_x0 + size * 0.2)
+    place = pymupdf.Rect(col_x0, mid - need / 2.0, base_x, mid + need / 2.0)
+    if space is not None:
+        space.reserve(place)
+
+    soft_pt = max(typography.readable_floor(glyph_h),
+                  glyph_h * typography.SHRINK_FLOOR)
+    return (c, out, vfill, size, font, None, size < soft_pt, place)
 
 
 def _content_center(rects, r, ink, space=None):
@@ -2364,12 +2539,15 @@ def paint_plans(page, plans, report=None):
         # 基线不能贴框底，要往下留出 y/g/p 的下伸部 —— 落了就压到框下的图线上
         base_y = place.y1 - size * typography.DESCENDER
         if c.get("vertical"):
-            # 竖排标注逆时针 90° 写回：以框右下角为 baseline 起点，
+            # 竖排标注逆时针 90° 写回：以落点框右下角为 baseline 起点，
             # 文字向上生长，字身落在基线左侧，正好覆盖原框。
             # Matrix(90) 在 y 轴向下的坐标系里是逆时针 90°，
             # 和制图标准里垂直尺寸数字的朝向一致（从下往上读）。
             # 若按水平写法铺在十几点宽的窄框里，字会被压成一条缝。
-            pivot = pymupdf.Point(c["rect"].x1, c["rect"].y1)
+            #
+            # 起点用 place 而不是原框：竖排缩字号后要在「原件 + 上下借到的
+            # 空白」里居中（见 _plan_vertical），拿原框当起点只会上下一头沉。
+            pivot = pymupdf.Point(place.x1, place.y1)
             tw.append(pivot, out, font=font, fontsize=size)
             tw.write_text(page, color=color, morph=(pivot, pymupdf.Matrix(90)))
         elif lines and len(lines) > 1:
