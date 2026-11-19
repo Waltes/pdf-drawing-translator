@@ -19,9 +19,17 @@ from . import edition
 from .paths import DATA_DIR
 
 GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.csv")
+# 通用文档模式专用的用户词库。**不随安装包发**，用户自己建。
+#
+# 为什么单独一份而不是复用 glossary.csv：后者是安装包发的种子文件，里面
+# 624 条全是机械/五金/护栏类图纸术语。通用文档模式要靠它区分「程序自带的
+# 图纸术语」和「用户自己加的术语」，而两者在同一份 CSV 里混着，靠行号、
+# 靠比对升级前的备份都不可靠 —— 用户随手改一行就全乱了。分成两个文件，
+# 语义是硬的：glossary.csv 是程序的，glossary_custom.csv 是用户的。
+CUSTOM_GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary_custom.csv")
 
 
-def glossary_paths():
+def glossary_paths(drawing=True):
     """
     要加载的术语库文件，按优先级从高到低。
 
@@ -31,6 +39,9 @@ def glossary_paths():
 
     专属库缺失时只少一份词表，不影响启动 —— 客户把它误删了，
     程序照样能翻，只是回到通用译法。
+
+    drawing=False：通用文档模式，不读安装包发的那份图纸术语库
+    （624 条全是机械、五金、护栏类），改读用户自己的 glossary_custom.csv。
     """
     paths = []
     extra = edition.extra_glossary()
@@ -38,8 +49,12 @@ def glossary_paths():
         p = os.path.join(DATA_DIR, extra)
         if os.path.exists(p):
             paths.append(p)
-    if os.path.exists(GLOSSARY_PATH):
-        paths.append(GLOSSARY_PATH)
+    if drawing:
+        if os.path.exists(GLOSSARY_PATH):
+            paths.append(GLOSSARY_PATH)
+    else:
+        if os.path.exists(CUSTOM_GLOSSARY_PATH):
+            paths.append(CUSTOM_GLOSSARY_PATH)
     return paths
 
 # ---------------------------------------------------------------------------
@@ -230,7 +245,18 @@ def _read_csv_rows(path):
 class Glossary:
     """术语库：同时持有 中→英 与 英→中 两张表"""
 
-    def __init__(self, path: str = None):
+    def __init__(self, path: str = None, drawing: bool = True):
+        """
+        drawing=False：通用文档模式。不读图纸术语库（glossary.csv，624 条全是
+        机械、五金、护栏类专业词），只读用户自己的 glossary_custom.csv。
+
+        为什么通用文档模式要这么做：内置那批词拿去翻说明书或合同会强行套用 ——
+        一份纺织类文档里的 collar 被译成「锁紧环」、sleeve 译成「套管」，
+        都是这么来的。而用户自己写的词两种模式都该算数，所以不能整份跳过，
+        得有个位置区分「程序的词」和「用户的词」。
+
+        path 参数仍然优先：自检和测试脚本要能精确指定一份文件。
+        """
         self.zh2en = {}
         self.en2zh = {}
         self.en2zh_norm = {}        # 去尾标点的查表副本，见 _key_norm
@@ -244,9 +270,12 @@ class Glossary:
         # 译文默认全大写（见 core/casing.py），客户想让某个词保持自己的写法时，
         # 在这一列写死。空表就是「全按默认规则」。
         self.case_map = {}
-        # 不传 path 时按发行版自动取：定制版专属库在前，通用库在后。
-        # 传了 path 就只读那一份 —— 自检和测试脚本需要能精确指定。
-        for p in ([path] if path else glossary_paths()):
+        if path:
+            files = [path]
+        else:
+            # 不传 path 时按发行版与文档类型自动取，见 glossary_paths
+            files = glossary_paths(drawing=drawing)
+        for p in files:
             self._load(p)
 
     def _load(self, path: str):

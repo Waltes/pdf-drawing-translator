@@ -25,9 +25,9 @@ from . import review as review_mod
 # 单位换算的判定要和翻译层用同一套规则，不能各写一份：
 # 「这条原文里有没有会被换算的量」直接问翻译层要答案，
 # 否则这边改了那边没改，会出现「单位声明改了、数值却没换算」的错位。
-from .translate import (UNIT_IMPERIAL, UNIT_KEEP, UNIT_METRIC,
-                        convert_to_metric, convert_units, has_imperial,
-                        has_metric)
+from .translate import (DOC_DRAWING, DOC_GENERAL, UNIT_IMPERIAL, UNIT_KEEP,
+                        UNIT_METRIC, convert_to_metric, convert_units,
+                        has_imperial, has_metric)
 
 
 def needs_convert(text, mode=UNIT_METRIC):
@@ -1582,7 +1582,7 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 render_preview=True, translate_batch=None, scan_images=True,
                 stats_out=None, annotate_path=None, unit_mode=UNIT_METRIC,
                 ocr_full_pages=False, verify=True, dst_lang=None,
-                reviewer=None, detect_outlined=True):
+                reviewer=None, detect_outlined=True, doc_type=DOC_DRAWING):
     """
     处理整份 PDF。
     translate_fn(text, lang) -> str      逐条翻译（兼容旧用法）
@@ -1638,7 +1638,14 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                                          stats_out["outlined"] 给未译清单如实交代。
                                          整页 OCR 模式下自动跳过（那种模式本来就把
                                          轮廓字一起处理了）。
+    doc_type                             文档类型 drawing / general。它决定图片层
+                                         OCR 用的术语库（通用文档模式只采信锁定词），
+                                         也决定要不要做长度统一（见 unify_length 的
+                                         调用点）。默认 drawing —— 老调用方不传时
+                                         行为与改造前一致。
     """
+    # 图片层的术语库按文档类型取，与翻译主链路同源
+    image_text.set_doc_type(doc_type)
     doc = pymupdf.open(src_path)
     total = len(doc)
     all_report = []
@@ -1772,9 +1779,14 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 # 后面基于符号的正则换算就认不出来了。数值一律用自己算的。
                 if kind == "size":
                     # 尺寸标注不送翻译，但同样要统一到 mm —— 客户的
-                    # 「1.118×3.05米」如果不走翻译通道，就没人替它改了
-                    new_text = typography.unify_length(
-                        convert_units(text, unit_mode))
+                    # 「1.118×3.05米」如果不走翻译通道，就没人替它改了。
+                    #
+                    # 通用文档模式不做这一步：那是图纸才有的需要（尺寸链上
+                    # 单位和写法要齐）。文档里的「2.79 米」译成英文该是
+                    # 2.79 m，改成 2790mm 是把读者的算术强加给读者。
+                    new_text = convert_units(text, unit_mode)
+                    if doc_type != DOC_GENERAL:
+                        new_text = typography.unify_length(new_text)
 
                 # 内容和原文一样（只差数字尾零、空格这些写法）就什么都别做。
                 #

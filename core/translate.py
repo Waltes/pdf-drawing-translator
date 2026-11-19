@@ -41,13 +41,18 @@ CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 FIXES_PATH = os.path.join(DATA_DIR, "fixes.csv")
 
 
-def fixes_paths():
+def fixes_paths(drawing=True):
     """
     机翻纠错表，按优先级从高到低。
 
     定制版的专属纠错排前面：它是针对这个客户图纸总结出来的，
     比通用表更具体，应当先命中。替换是顺序执行字符串替换，
     所以「先表里的规则先动手」这个顺序就是优先级本身。
+
+    drawing=False（通用文档模式）：不读安装包发的那张表，改读
+    data/fixes_custom.csv。那张表的 70 条全是图纸专用的字面直译纠正
+    （collar→锁紧环、sleeve→套管、extender posts→加长立柱），
+    放进一份服装或家具说明书里，本来译对的「衣领」会被它改回「锁紧环」。
     """
     out = []
     extra = edition.extra_fixes()
@@ -55,8 +60,14 @@ def fixes_paths():
         p = os.path.join(DATA_DIR, extra)
         if os.path.exists(p):
             out.append(p)
-    if os.path.exists(FIXES_PATH):
-        out.append(FIXES_PATH)
+    if drawing:
+        if os.path.exists(FIXES_PATH):
+            out.append(FIXES_PATH)
+    else:
+        # 用户自己的纠错表。不随安装包发，没有就是空的。
+        custom = os.path.join(DATA_DIR, "fixes_custom.csv")
+        if os.path.exists(custom):
+            out.append(custom)
     return out
 
 # 在线接口偶尔会返回各种脏东西，必须拦在门外，不能写进图纸：
@@ -669,6 +680,32 @@ UNIT_IMPERIAL = "imperial"
 UNIT_KEEP = "keep"
 UNIT_MODES = (UNIT_METRIC, UNIT_IMPERIAL, UNIT_KEEP)
 
+# ---------------------------------------------------------------------------
+# 文档类型：决定用哪一套翻译规则
+# ---------------------------------------------------------------------------
+# 通用版要处理的内容是多元的 —— 有人拿它翻机械图纸，也有人拿它翻说明书、
+# 合同、技术规范、宣传资料。这两类内容对译文的期待不一样，一套规则覆盖不了：
+#
+#   drawing 图纸：读者是车间工人和安装工人，标注要短、要按制图习惯缩写
+#                （thickness→THK）、单位要换算成车间能直接用的公制、
+#                短标注不带助词和句号。
+#   general 通用：读者是普通读者，句子要有完整语法、缩写会让人读不懂、
+#                合同里的「2.79 米」翻成英文就该是 2.79 m 而不是 2790 mm。
+#
+# 所以做成两套提示词，由用户选。为什么不让程序自动判：判错了的表现是
+# 「整份文件被当成图纸压成标注体」或者反过来「图纸标注被写成完整句子撑爆
+# 格子」，两种都不易察觉，且用户没法知道该怪谁。让用户选一次，成本最低。
+#
+# 定制版（DYNAMIC）永远走 drawing —— 那个客户只发图纸。
+DOC_DRAWING = "drawing"
+DOC_GENERAL = "general"
+DOC_TYPES = (DOC_DRAWING, DOC_GENERAL)
+
+
+def normalize_doc_type(value):
+    """认不出来的值一律当图纸 —— 老配置文件里没有这个字段，不能因此改变行为"""
+    return value if value in DOC_TYPES else DOC_DRAWING
+
 
 def normalize_unit_mode(mode):
     """配置里存的值可能是手改过的怪东西，一律折回合法值"""
@@ -1077,6 +1114,10 @@ def default_config():
             # 只影响首次启动、还没有配置文件的那一次，之后以用户的选择为准。
             "dst": edition.default_dst() or "auto",
             "units": UNIT_METRIC,
+            # 文档类型：drawing / general，见文件头 DOC_* 的说明。
+            # 默认图纸 —— 老配置文件里没有这个键，默认值一变就等于替老用户
+            # 默默换了套规则，他们升级后会以为程序坏了。
+            "doc_type": DOC_DRAWING,
         },
     }
 
@@ -1217,7 +1258,9 @@ class Translator:
 
     def __init__(self, config=None):
         self.cfg = config or load_config()
-        self.glossary = dict_engine.Glossary()
+        # 方向、单位、文档类型要先读：下面读缓存和纠错表时都要按文档类型
+        # 决定读哪几个文件，doc_type 还没定就取文件会读到图纸那份。
+        self._load_direction()
         self.cache = self._load_cache()
         self.fixes = self._load_fixes()
         self.stats = {"dict": 0, "online": 0, "llm": 0, "cache": 0, "failed": 0}
@@ -1236,22 +1279,44 @@ class Translator:
         self.page_no = None
         # 输出前语义抽查的候选条目 [(页码, 原文, 译文)]，见 _review_worthy
         self._review_list = []
-        # 方向与输出单位。三项都存在 cfg["translate"] 里，界面改完调 set_direction
-        self._load_direction()
+        # 方向、输出单位与文档类型。三项都存在 cfg["translate"] 里，
+        # 界面改完调 set_direction。注意：_load_direction 已在 __init__ 开头调过，
+        # 这里只建术语库（它依赖 doc_type）。
+        self.glossary = self._make_glossary()
+
+    def _make_glossary(self):
+        """
+        按文档类型建术语库。
+
+        通用文档模式只读用户自己的 glossary_custom.csv，不读内置的图纸术语库
+        （glossary.csv，624 条全是机械/五金/护栏类）—— 否则一份服装或食品类
+        文档里的 collar 会被强行译成「锁紧环」、sleeve 译成「套管」。分开两个
+        文件是不得已：用户自己的词得有个地方放，而它和程序的词混在同一份 CSV
+        里就无法区分。
+        """
+        return dict_engine.Glossary(drawing=(self.doc_type != DOC_GENERAL))
 
     def _load_direction(self):
         tr = (self.cfg or {}).get("translate") or {}
         self.src_lang = tr.get("src") or "auto"
         self.dst_lang = tr.get("dst") or "auto"
         self.unit_mode = normalize_unit_mode(tr.get("units"))
+        # 定制版只有图纸，强制 drawing：客户把配置改坏了也不会走错规则
+        self.doc_type = (DOC_DRAWING if edition.is_custom()
+                         else normalize_doc_type(tr.get("doc_type")))
 
-    def set_direction(self, src=None, dst=None, units=None, save=True):
+    def set_direction(self, src=None, dst=None, units=None, doc_type=None,
+                      save=True):
         """
-        界面上的三个下拉改了就调这里，热生效，不用重启。
+        界面上的下拉改了就调这里，热生效，不用重启。
 
         为什么单位和方向要放到同一个方法：它们共享同一条出口逻辑
         （换算 → 校验 → 标注），分开设会出现「方向已经变了、校验还按老方向算」
         的半截状态，正好落在一次转换中间时最难排查。
+
+        doc_type 也走这里：切文档类型会连带换提示词、换术语库、关掉长度统一，
+        三处都依赖它，分开放必然出现「提示词已经是通用文档、术语表还是图纸库」
+        的中间态。
         """
         tr = self.cfg.setdefault("translate", {})
         if src is not None:
@@ -1263,6 +1328,16 @@ class Translator:
         if units is not None:
             self.unit_mode = normalize_unit_mode(units)
             tr["units"] = self.unit_mode
+        if doc_type is not None and not edition.is_custom():
+            new = normalize_doc_type(doc_type)
+            if new != self.doc_type:
+                self.doc_type = new
+                tr["doc_type"] = new
+                # 术语库按新模式重建（图纸库 vs 只采信锁定词）
+                self.glossary = self._make_glossary()
+                # 已出过的缓存译文是按旧规则译的，模式切换后若还走缓存，
+                # 用户会看到「切了模式但译文没变」。清掉，代价是重译一次。
+                self.cache = {}
         if save:
             try:
                 save_config(self.cfg)
@@ -1328,7 +1403,8 @@ class Translator:
         AI 时代的用途变了：主要兜住「免费机翻」和「词典拼装」的结果。
         """
         pairs = []
-        for fp in fixes_paths():
+        drawing = getattr(self, "doc_type", DOC_DRAWING) != DOC_GENERAL
+        for fp in fixes_paths(drawing=drawing):
             try:
                 with open(fp, "r", encoding="utf-8-sig", newline="") as f:
                     reader = csv.reader(f)
@@ -1363,9 +1439,15 @@ class Translator:
         否则会出现「明明补了词条，结果还是老样子」这种莫名其妙的情况。
         """
         h = hashlib.md5()
+        # 文档类型本身要进指纹：两种模式读的是不同文件（图纸库 vs 用户自定义库），
+        # 只按文件算的话，两套文件都没改动时指纹相同，切模式后仍会命中旧缓存 ——
+        # 表现是「切了却没变」，这种问题最难让人相信是配置生效了。
+        drawing = getattr(self, "doc_type", DOC_DRAWING) != DOC_GENERAL
+        h.update(b"drawing" if drawing else b"general")
         # 专属词库/纠错表也要参与指纹：客户改了自己的锁标词表，
         # 之前按旧词表算出来的缓存必须作废，否则改了词表却看不到变化
-        for p in (dict_engine.glossary_paths() + fixes_paths()):
+        for p in (dict_engine.glossary_paths(drawing=drawing)
+                  + fixes_paths(drawing=drawing)):
             if os.path.exists(p):
                 h.update(f"{os.path.getmtime(p):.3f}:{os.path.getsize(p)}".encode())
         return h.hexdigest()[:16]
@@ -1575,8 +1657,14 @@ class Translator:
         为什么跟界面语言走而不是跟翻译方向走：国际版用户多半挂着 OpenAI/Claude，
         英文提示词对它们最省事；中文用户挂 DeepSeek/通义，中文提示词最稳。
         界面语言正好就是「这个人习惯哪种语言」的最准信号。
+
+        文档类型（doc_type）决定用哪一套：图纸要短、要缩写、要换算；通用文档
+        要完整语法、不缩写、不换算。两套差别太大，塞进一套靠模型自己判断，
+        结果是同一份文件里风格来回跳。
         """
         rule = self._unit_rule_block()
+        if self.doc_type == DOC_GENERAL:
+            return self._system_prompt_general(rule)
         if i18n.is_en():
             return (
                 "You are a senior engineering-drawing translator working on mechanical, hardware, "
@@ -1659,6 +1747,88 @@ class Translator:
             "普通名词按制图习惯缩写：galvanized→galv.、thickness→THK、diameter→DIA、"
             "stainless steel→S.S.、square tube→sq. tube、quantity→QTY、maximum→MAX、"
             "approximately→approx.。缩写只用于普通名词，型号、材料牌号、标准号照抄不缩。\n"
+            + self._case_rule()
+            + "10. 只输出 JSON，不要任何解释文字。\n"
+            "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
+
+    def _system_prompt_general(self, rule):
+        """
+        通用文档模式的系统提示词。
+
+        与图纸版的差别，逐条说清（这也是这个函数值得单独存在的理由）：
+          · 角色不同：读者是普通读者，不是车间工人。图纸版那句「读者是车间工人
+            和安装人员」会引导模型把任何文本都压成标注体。
+          · 句式不同：图纸版第 3 条要求「短标注不加助词、不加句号」。这条用在
+            说明书正文上，出来就是满篇电报体 —— 原文有完整句子也被拆成断句。
+          · 缩写不同：图纸版第 9 条要求按制图习惯缩写（thickness→THK、
+            approximately→approx.）。文档里 THK 没人看得懂，照做就是制造阅读障碍。
+          · 「寸」不同：图纸版第 6 条把「寸」一律当管径转 DN。文档里「三寸照片」
+            「一寸光阴」照这条会变成 DN80。
+          · 单位不同：图纸版强制换算成毫米。合同里的「2.79 米」翻成英文就该是
+            2.79 m，写成 2790mm 是给读者添麻烦。
+
+        保留的四条是两边都成立的：代号照抄（5）、符号照抄（5b）、
+        人名公司名照抄（5c）、术语统一（8）。这几条换成任何文体都不会错。
+        """
+        if i18n.is_en():
+            return (
+                "You are a senior professional translator working on general business and "
+                "technical documents: product manuals, operating instructions, specifications, "
+                "contracts, test reports, company profiles. Your output replaces the source text "
+                "and is read by ordinary readers, not shop-floor workers.\n"
+                "Rules:\n"
+                "1. Use standard industry terminology in the correct domain, never everyday "
+                "meanings, and keep one consistent rendering per term across the whole document.\n"
+                "2. Rewrite in the target language's natural word order. Never translate word "
+                "for word; read like a document written by a native professional in that field.\n"
+                "3. Keep sentences complete. If the source is a full sentence, the translation is "
+                "a full sentence: articles, conjunctions and final punctuation included. Use label "
+                "style only where the source itself is a bare label. Do not compress prose into "
+                "telegraph style to save space — this is a document, not a drawing annotation.\n"
+                + rule + "\n"
+                "5. Part numbers, product codes, standard numbers (GB/T, ISO, ASTM, DIN), "
+                "material grades, batch and version numbers, page numbers: copy verbatim, never "
+                "convert, renumber or rewrite.\n"
+                "5b. Symbols are copied verbatim — never substitute a look-alike character: "
+                "± ° × ÷ ≤ ≥ ⌀ Ø R. Writing × as x or ± as + changes the meaning.\n"
+                "5c. Personal names, company names and brand names are copied verbatim — never "
+                "transliterate or translate them, unless the source itself carries an official "
+                "Chinese name. Job titles and department names around them are still translated.\n"
+                "6. Keep every number exactly as written: same value, same precision, no rounding "
+                "and no added trailing zeros.\n"
+                "7. Do not leave words from the source language in the output (part numbers, "
+                "units, standard codes excepted).\n"
+                "8. Do not abbreviate ordinary nouns of your own accord. Write thickness, "
+                "diameter, approximately in full unless the source itself is abbreviated; "
+                "abbreviations the source uses are kept as they are.\n"
+                "9. Do not add information that is not in the source, and do not drop any: "
+                "no explanatory parentheses, no softening, no omission of clauses.\n"
+                + self._case_rule()
+                + "10. Output JSON only, no prose.\n"
+                "Format: [{\"id\":0,\"text\":\"translation\"}]")
+        return (
+            "你是资深笔译，处理各类文档：产品说明书、操作手册、技术规范、合同条款、"
+            "检测报告、企业介绍、宣传资料。译文会直接替换原文使用，读者是普通读者，"
+            "不是车间工人。\n"
+            "必须遵守：\n"
+            "1. 术语按所在领域的标准说法译，不用日常义；同一份文件内同一术语译法统一。\n"
+            "2. 按目标语言的语序重写，不要逐字直译。长句该拆就拆，读起来要像目标语言\n"
+            "   母语者写的正式文本。\n"
+            "3. 保持句式完整：原文是完整句子就译成完整句子，冠词、连接词、句末标点都要有。\n"
+            "   只有原文本身是标签（几个词、没有谓语）时才用标签体。\n"
+            "   不要为了省版面把句子压成电报体 —— 这是文档，不是图纸标注。\n"
+            + rule + "\n"
+            "5. 以下是型号、编号、代号，绝对不能换算、不能改写，原样照抄：产品型号、"
+            "规格代码、标准号（GB/T、ISO、ASTM、DIN）、材料牌号、批次号、版本号、页码。\n"
+            "5b. 符号原样保留，不许换成形状相近的字符：± ° × ÷ ≤ ≥ ⌀ Ø R。"
+            "把 × 写成 x、把 ± 写成 +，意思就变了。\n"
+            "5c. 人名、公司名、品牌名照抄，不许音译、不许意译，除非原文本身带官方中文名；"
+            "人名、公司名前后的职务和部门照常翻。\n"
+            "6. 数值原样保留：同一个值、同样的精度，不四舍五入、不补尾零。\n"
+            "7. 译文里不许残留源语言的词（型号、单位、标准号、代号除外）。\n"
+            "8. 不要自行缩写普通名词：thickness、diameter、approximately 该写全就写全，"
+            "除非原文本身就是缩写；原文用缩写的照原样保留。\n"
+            "9. 不要添加原文没有的信息，也不要删减：不加解释性括注、不弱化语气、不漏从句。\n"
             + self._case_rule()
             + "10. 只输出 JSON，不要任何解释文字。\n"
             "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
@@ -2541,10 +2711,15 @@ class Translator:
             # 长度单位统一到 mm（客户 2026-11-19 拍板）。
             # 放在换算之后：换算只处理英制→公制，管不了「米还是毫米」；
             # 放在 verify 之后：复算是拿原文比数值，先改写法会被判成「数值不符」。
-            uni = typography.unify_length(new)
-            if uni != new:
-                results[i] = uni
-                new = uni
+            #
+            # 只对图纸生效：图纸上尺寸链要单位和写法齐（1.118×3.05米 必须整条
+            # 变 1118×3050mm）；通用文档里「2.79 米」译成英文就该是 2.79 m，
+            # 改成 2790mm 属于替读者改原文。
+            if self.doc_type != DOC_GENERAL:
+                uni = typography.unify_length(new)
+                if uni != new:
+                    results[i] = uni
+                    new = uni
             # 标点本地化 + 大小写规范。放在锁定词之后、所有通道之外的同一位置，
             # 理由和锁定词一样：三条通道各有各的出口，逐个加必然漏。
             #
@@ -2901,7 +3076,8 @@ class Translator:
                 # 而同一份文件别处已经是 1103mm、3050mm —— 一份图两种长度单位）。
                 # 凡是 translate_many 出口做的规范化，这里一个都不能少：
                 # 重译是绕开通道直连模型的，出口没有第二道网。
-                val = typography.unify_length(val)
+                if self.doc_type != DOC_GENERAL:
+                    val = typography.unify_length(val)
                 val = typography.localize(val, dst)
                 if dst == "en":
                     val = casing.apply_style(

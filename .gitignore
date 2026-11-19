@@ -96,6 +96,9 @@ _survey/
 # 通用版体检产物（_std_check.py）。和 _batch/ 分开：同一份图纸两版各跑一遍，
 # 输出混在一个目录里就没法对比大小写行为了
 _std/
+# 文档类型对照产物（_doc_check.py / _synth_doc.py）与界面截图（_ui_check_doc.py）
+_doc/
+_ui/
 _ed_bak.json
 # _batch.py 切换发行版时留的临时备份。正常情况下它在 atexit 里被删掉，
 # 但进程被强杀（改逻辑时中断压测）就会留下来 —— 内容没变，但会一直

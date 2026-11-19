@@ -174,6 +174,14 @@ EN = {
     "公制（毫米·千克）": "Metric (mm · kg)",
     "英制（英寸·磅）": "Imperial (in · lb)",
     "保持原样，不换算": "No conversion",
+    # 文档类型下拉。英文标签点明两种风格的差别：图纸要短、要按制图习惯缩写，
+    # 文档要完整句子。只写 Drawing / Document 用户看不出它换了什么。
+    "文档类型": "Doc type",
+    "图纸（标注风格）": "Drawing (label style)",
+    "文档（一般文体）": "Document (prose style)",
+    "已切到「文档」：单位不再换算，句子按完整语法译。确实需要换算的话，改上面的「输出单位」即可。":
+        "Switched to Document: units are no longer converted and sentences are "
+        "translated in full grammar. Change Output units above if you need conversion.",
     "自动（{lang}）": "Auto ({lang})",
     "自动识别": "Auto-detect",
 

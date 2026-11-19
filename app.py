@@ -1784,15 +1784,24 @@ class App(GlassWindow):
             bg=CARD_BG_ALT, fg=TEXT_FAINT, justify="center",
             font=t.font(t.font_size - 1))
 
-        # ---- 翻译设置：方向 + 输出单位 + 输出目录 ----
+        # ---- 翻译设置：方向 / 文档类型+单位 / 输出目录 ----
         # 这三项放一张卡里，是因为它们都属于「这一次转换怎么干」，
         # 和上面的文件列表、下面的开始按钮是同一条动线上的东西。
         # 高度必须显式给：Card 是 Canvas，不传 height 时它按 Tk 默认的
         # 字符高度报期望值（实测报到 265），_fit_vertical 拿它做预算就会
         # 把拖拽区和文件列表白压一截。这里按内容算：
-        # 上下 padding 24 + 下拉行 30 + 行距 8 + 输出目录行 28 = 90，留 6 余量
+        # 上下 padding 24 + 三个下拉行 30 + 两段行距 8 + 输出目录行 28 = 124，
+        # 留 10 余量取 134。余量不能省：Card 的内容区高度是「卡片高 - padding×2」，
+        # 恰好等于内容高时，最后一行会被裁掉一个像素的边（实测 128 时第三行
+        # 「输出到」整行看不见，卡片看着像少了一块）。
+        #
+        # 为什么要三行而不是两行：1300 物理像素宽（100% 缩放下的 1366 屏）
+        # 放不下四个下拉。原先「方向 + 单位」两行各占一个下拉的宽度刚好，
+        # 再加一个「文档类型」就必须挤出右边那个 —— 实测行0 的输出单位
+        # 在 880 逻辑宽的窗口里右边界到 1004，卡片只有 856，直接被裁掉。
+        # 拆成三行后每行最多两个下拉，1300 宽下还剩 300 余量。
         self.card_opt = Card(host, t, radius=12, padding=12, shadow=12,
-                             shadow_alpha=100, height=96)
+                             shadow_alpha=100, height=134)
         self.card_opt.pack(fill="x", pady=(0, t.px(12)))
         ob = self.card_opt.body
 
@@ -1820,25 +1829,43 @@ class App(GlassWindow):
         if tr.dst_lang not in [k for k, _ in i18n.dst_options(tr.src_lang)]:
             self.sel_dst.set_value(i18n.dst_options(tr.src_lang)[0][0])
 
-        tk.Label(row1, text=T("输出单位"), bg=CARD_BG, fg=TEXT_DIM,
-                 font=t.font(t.font_size - 1)).pack(side="left",
-                                                    padx=(t.px(16), 0))
-        self.sel_unit = SelectBox(row1, t, items=i18n.unit_options(),
+        # ---- 第二行：文档类型 + 输出单位 ----
+        # 这两者是一对：文档类型决定「要不要换算」，单位决定「换算成哪边」。
+        # 放在同一行，用户一眼能看出它们有关系（切到「文档」时单位会被改成
+        # 「保持原样」，就在旁边，看得见）。
+        row2 = tk.Frame(ob, bg=CARD_BG)
+        row2.pack(fill="x", pady=(0, t.px(8)))
+        # 文档类型：决定用哪一套翻译规则（图纸标注体 vs 一般文体）。
+        # 定制版不显示 —— 那个客户只发图纸，给一个能切错的下拉没有意义。
+        self.sel_doc = None
+        from core import edition as _edition
+        if not _edition.is_custom():
+            tk.Label(row2, text=T("文档类型"), bg=CARD_BG, fg=TEXT_DIM,
+                     font=t.font(t.font_size - 1)).pack(side="left")
+            self.sel_doc = SelectBox(row2, t, items=i18n.doc_options(),
+                                     value=tr.doc_type,
+                                     command=self._on_doc_change, height=30)
+            self._fit_select(self.sel_doc, 186)
+            self.sel_doc.pack(side="left", padx=(t.px(8), t.px(16)))
+
+        tk.Label(row2, text=T("输出单位"), bg=CARD_BG, fg=TEXT_DIM,
+                 font=t.font(t.font_size - 1)).pack(side="left")
+        self.sel_unit = SelectBox(row2, t, items=i18n.unit_options(),
                                   value=tr.unit_mode, command=self._on_unit_change,
                                   height=30)
         self._fit_select(self.sel_unit, 186)
         self.sel_unit.pack(side="left", padx=(t.px(8), 0))
 
-        # 输出目录
-        row2 = tk.Frame(ob, bg=CARD_BG)
-        row2.pack(fill="x")
-        tk.Label(row2, text=T("输出到"), bg=CARD_BG, fg=TEXT_DIM,
+        # ---- 第三行：输出目录 ----
+        row3 = tk.Frame(ob, bg=CARD_BG)
+        row3.pack(fill="x")
+        tk.Label(row3, text=T("输出到"), bg=CARD_BG, fg=TEXT_DIM,
                  font=t.font(t.font_size - 1)).pack(side="left")
-        self.lbl_out = tk.Label(row2, text=T("源文件旁（每份一个文件夹）"),
+        self.lbl_out = tk.Label(row3, text=T("源文件旁（每份一个文件夹）"),
                                 bg=CARD_BG, fg=TEXT,
                                 font=t.font(t.font_size - 1))
         self.lbl_out.pack(side="left", padx=(t.px(10), 0))
-        RoundButton(row2, t, T("选择目录"), kind="ghost", height=28, width=86,
+        RoundButton(row3, t, T("选择目录"), kind="ghost", height=28, width=86,
                     font_size=t.font_size - 1,
                     command=self._pick_outdir).pack(side="right")
 
@@ -2030,6 +2057,28 @@ class App(GlassWindow):
 
     def _on_unit_change(self, *a):
         self.translator.set_direction(units=self.sel_unit.get())
+
+    def _on_doc_change(self, *a):
+        """
+        切文档类型。
+
+        切到「文档」时把输出单位落到「保持原样」，并且显式告诉用户我替他改了 ——
+        这一步必须做：文档模式下单位换算（2.79 米 → 2790mm）本身就是错的，
+        但用户看不出「译文里的数字为什么被改过」，只会觉得程序算错了数。
+        反过来切回「图纸」时不动单位：他可能为了别的目的自己调过。
+
+        为什么不干脆把单位下拉禁用：有人确实需要「文档 + 换算成英制」
+        （英文说明书给美国客户看），禁掉就把这条路堵死了。
+        """
+        if self.sel_doc is None:
+            return
+        dt = self.sel_doc.get()
+        self.translator.set_direction(doc_type=dt)
+        if dt == "general" and self.sel_unit.get() != "keep":
+            self.sel_unit.set_value("keep")
+            self.translator.set_direction(units="keep")
+            self._say(T("已切到「文档」：单位不再换算，句子按完整语法译。"
+                        "确实需要换算的话，改上面的「输出单位」即可。"), "dim")
 
     def _draw_progress(self):
         """自绘进度条：Tk 原生 ttk 进度条在高分屏上又丑又不跟主题"""
@@ -2468,7 +2517,10 @@ class App(GlassWindow):
                                        # 显式传，别让引擎去猜 —— 猜错时
                                        # 残留检查会静默失效，等于这次复核白跑
                                        dst_lang=self.translator.dst_lang,
-                                       reviewer=self.translator)
+                                       reviewer=self.translator,
+                                       # 文档类型：决定图片层 OCR 用哪套术语库、
+                                       # 以及要不要做长度统一（米→毫米）
+                                       doc_type=self.translator.doc_type)
                 # 复核还有没解决的问题：v1.0.9 起**不再拦文件**，文件照常生成，
                 # 这里把清单完整打出来，让用户知道哪几处要自己看。
                 # 早先的做法是「不过就不出文件」，实际用下来很糟 ——

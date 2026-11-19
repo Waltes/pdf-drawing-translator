@@ -3,7 +3,7 @@
   "id": "standard",
   "name_zh": "PDF 图纸翻译",
   "name_en": "PDF Drawing Translator",
-  "version": "1.1.13",
+  "version": "1.1.14",
   "data_dir": "PDFDrawingTranslator",
   "exe_name": "PDF图纸翻译",
   "app_id_guid": "{E07108F2-9CFA-4C91-A748-948BDE9016E8}",

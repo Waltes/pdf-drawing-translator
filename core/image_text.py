@@ -549,15 +549,40 @@ def lookup_outline_term(text):
 _PART_HIT_RATIO = 0.6
 
 _GLOSSARY_CACHE = None
+# 当前文档类型。只影响「要不要采信内置图纸术语」（见 _get_glossary），
+# 由 pdf_engine.process_pdf 在处理每份文件前设一次。
+_DOC_TYPE = "drawing"
+
+
+def set_doc_type(doc_type):
+    """
+    切换文档类型，同时清掉与它相关的缓存。
+
+    为什么要清：_GLOSSARY_CACHE 是进程级的，一次转换里只有一种文档类型；
+    但同一个程序连续翻两份（一份图纸、一份说明书）时，缓存不清就会让后一份
+    沿用前一份的术语库 —— 表现为「切了模式但结果没变」，很难排查。
+    """
+    global _DOC_TYPE, _GLOSSARY_CACHE, _WORD_VOCAB
+    new = doc_type if doc_type in ("drawing", "general") else "drawing"
+    if new == _DOC_TYPE:
+        return
+    _DOC_TYPE = new
+    _GLOSSARY_CACHE = None
+    _WORD_VOCAB = None
 
 
 def _get_glossary():
-    """术语表只加载一次（669 条 CSV，每个词都重读会把整页 OCR 拖慢几倍）"""
+    """
+    术语表只加载一次（669 条 CSV，每个词都重读会把整页 OCR 拖慢几倍）。
+
+    通用文档模式只读用户自己的 glossary_custom.csv，与翻译主链路保持一致 ——
+    否则同一份文件里主链路按通用规则、图片层按图纸术语拆词，两份译文会打架。
+    """
     global _GLOSSARY_CACHE
     if _GLOSSARY_CACHE is None:
         try:
             from . import dict_engine
-            _GLOSSARY_CACHE = dict_engine.Glossary()
+            _GLOSSARY_CACHE = dict_engine.Glossary(drawing=(_DOC_TYPE != "general"))
         except Exception:
             _GLOSSARY_CACHE = False
     return _GLOSSARY_CACHE or None
