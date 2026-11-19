@@ -1256,7 +1256,17 @@ def _rewrite_record(doc, rec, new_text):
              if r is not None]
     try:
         if rec.get("kind") == "image":
-            return image_text.rewrite_one(page, obj, new_text)
+            # 先擦再写。图内这条路以前漏了擦，重写结果直接叠在上一版上：
+            # 2026-11-19 实测第 3 页一条标注被写成两遍（8.67pt 三行 + 14.93pt
+            # 单行），两版错位叠着，比空白更糟。擦除范围用 stale（原框 +
+            # 上一版实际写到的位置），只擦文字、不动线条。
+            _erase_rects(page, stale)
+            box = image_text.rewrite_one(page, obj, new_text)
+            if box is None:
+                return False
+            # 记下这一版的写框，下一轮重写要按它擦 —— 不更新就会留下残字
+            rec["ink"] = [r for r in (rec.get("rect"), box) if r is not None]
+            return True
         if rec.get("kind") == "decl":
             # 声明格没有「翻译」可重做，重写就是按同一套规则再写一遍。
             # 它被打回的唯一原因是「格子里读不到字」，重写一次通常就好了。

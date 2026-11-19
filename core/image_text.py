@@ -969,7 +969,16 @@ def _merge_split_labels(cands, gap_em=0.6, row_em=0.35):
         for c in row[1:]:
             prev = merged[-1]
             h = max(prev["rect"].height, c["rect"].height, 1.0)
-            if c["rect"].x0 - prev["rect"].x1 <= h * gap_em:
+            gap = c["rect"].x0 - prev["rect"].x1
+            ok = gap <= h * gap_em
+            # 上一块以逗号/顿号/冒号收尾 —— 这句话没说完，下一块是它的后半截。
+            # 这类拼接允许更宽的间距（1.2 字高）：客户图纸底部
+            # 「材料：外方管…，内方管…，尺寸：…，」三块之间隔了 8~17pt，
+            # 按 0.6 字高合不起来，各自成条后被右边界卡死、只能一路缩字号，
+            # 实测「材料」那一条缩到 8.6pt，而同一基线上邻块是 14.6pt。
+            if not ok and prev["text"].rstrip().endswith(("，", "、", "：", "；", ",")):
+                ok = gap <= h * 1.2
+            if ok:
                 merged[-1] = _join_split(prev, c)
             else:
                 merged.append(c)
@@ -1214,13 +1223,31 @@ def process_page_images(page, translate_fn, used_rects, report,
     except Exception:
         pass
 
+    # 同一行并排的字段：标出每条向右最多能伸到哪。
+    # 必须在排版之前算完，理由同上面两步 —— 位置是排版的输入。
+    try:
+        _mark_right_stop(candidates)
+    except Exception:
+        pass
+
     plans = []
     for c, out in zip(candidates, outs):
+        # 纯标点（原文只有一个「。」「，」）：没有可译内容，也不该留在英文图上。
+        # OCR 会把句末那个全角句号单独切出来，中译英后它就那么在图上待着，
+        # 第 2 页底部「POWDER COATING」下面那个孤零零的「。」就是它。
+        # 这里只擦不写 —— 写一遍还是同一个符号。
+        if not re.search(r"[0-9A-Za-z\u4e00-\u9fff]", c["text"]):
+            try:
+                page.draw_rect(c["rect"], color=None,
+                               fill=tuple(float(v) / 255 for v in c["bg"]),
+                               width=0)
+            except Exception:
+                pass
+            continue
         plan = _plan_one(c, out, untranslated, font_cjk, font_latin,
                          glyph_h_hint=c.get("ink_h"), space=space)
         if plan is not None:
             plans.append(plan)
-
     # 收口：同类里落单的那几条拉回到同一个字号。必须在登记记录之前做 ——
     # 记录里的回读框要跟着最终写框走，拉齐改了写框，记录也得是新的。
     # 严格模式跳过：这一步会改已定稿的字号，与「字号锁死」直接冲突。
@@ -1705,37 +1732,59 @@ def _plan_strict(c, out, font, want_ink, fill, space, untranslated):
     # 英文的字面高度和中文不一样，用原框高度去探，探出来的边界会偏。
     band = pymupdf.Rect(r.x0, base - base_size * typography.INK_TOP,
                         r.x1, base + base_size * typography.DESCENDER)
-    limit = max(r.width, space.frame.x1 - r.x0)
-    room = max(space.clear_width(band, limit, ignore=fill), r.width)
+    limit_full = max(r.width, space.frame.x1 - r.x0)
+    room_full = max(space.clear_width(band, limit_full, ignore=fill), r.width)
+    # 同一行右边还有别人的字段时，留出断句的空再算一次可用宽度。
+    # 先按「窄」的那个试，能保住字号就用它；保不住字号就退回宽的 ——
+    # 取舍顺序是「字号一致 > 不贴邻」：同一基线上一条 9pt、一条 14pt，
+    # 比两段字靠得近更刺眼（2026-11-19 第 1 页底部实测）。
+    rs = c.get("right_stop")
+    room_stop = room_full
+    if rs:
+        room_stop = max(space.clear_width(
+            band, min(limit_full, max(r.width, rs - r.x0)), ignore=fill),
+            r.width)
 
-    size = base_size
-    for _ in range(8):
-        width = font.text_length(out, fontsize=size)
-        if os.environ.get("PT_DEBUG"):
-            import sys as _sys
-            print(f"[strict] sz={size:5.2f} w={width:6.1f} room={room:6.1f} "
-                  f"x0={r.x0:6.1f} base={base:6.1f} ctr={centered} "
-                  f"{out[:34]!r}", file=_sys.stderr)
-        # 1) 单行，左端锁死，原框内就放得下
-        box = _box_from(r.x0, base, size, width, 1)
-        if width <= room and space.is_clear(box, ignore=fill):
-            space.reserve(box)
-            return (c, out, fill, size, font, None, False, box)
-        # 2)(3)(4) 折行。wrap_text 不拆单词，词内不软断 —— 这是硬要求
-        lines = textfit.wrap_text(font, out, room, size)
-        if lines:
-            widest = max(font.text_length(seg, fontsize=size) for seg in lines)
-            for cand in (_box_down(r.x0, base, size, widest, len(lines)),
-                         _box_from(r.x0, base, size, widest, len(lines))):
-                if space.is_clear(cand, ignore=fill):
-                    space.reserve(cand)
-                    return (c, out, fill, size, font, lines,
-                            len(lines) > 1, cand)
-        # 5) 缩一档重来。0.85 是有意的：一档缩太多，同一页里几条需要缩的
-        #    会长得明显不一样；缩到 3.5pt 以下就停，再小印不出来
-        if size * 0.85 < typography.MIN_SIZE:
-            break
-        size *= 0.85
+    def _attempt(room_w):
+        """在给定可用宽度下，找出能放下的最大字号与写框（不占位）"""
+        size = base_size
+        for _ in range(8):
+            width = font.text_length(out, fontsize=size)
+            if os.environ.get("PT_DEBUG"):
+                import sys as _sys
+                print(f"[strict] sz={size:5.2f} w={width:6.1f} "
+                      f"room={room_w:6.1f} x0={r.x0:6.1f} base={base:6.1f} "
+                      f"ctr={centered} {out[:34]!r}", file=_sys.stderr)
+            # 1) 单行，左端锁死，原框内就放得下
+            box = _box_from(r.x0, base, size, width, 1)
+            if width <= room_w and space.is_clear(box, ignore=fill):
+                return size, None, box
+            # 2)(3)(4) 折行。wrap_text 不拆单词，词内不软断 —— 这是硬要求
+            lines = textfit.wrap_text(font, out, room_w, size)
+            if lines:
+                widest = max(font.text_length(seg, fontsize=size)
+                             for seg in lines)
+                for cand in (_box_down(r.x0, base, size, widest, len(lines)),
+                             _box_from(r.x0, base, size, widest, len(lines))):
+                    if space.is_clear(cand, ignore=fill):
+                        return size, lines, cand
+            # 5) 缩一档重来。0.85 是有意的：一档缩太多，同一页里几条需要缩的
+            #    会长得明显不一样；缩到 3.5pt 以下就停，再小印不出来
+            if size * 0.85 < typography.MIN_SIZE:
+                break
+            size *= 0.85
+        return None
+
+    best = _attempt(room_stop)
+    if rs and (best is None or best[0] < base_size * 0.92):
+        alt = _attempt(room_full)
+        if alt is not None and (best is None or alt[0] > best[0] + 0.01):
+            best = alt
+    if best is not None:
+        size, lines, box = best
+        space.reserve(box)
+        return (c, out, fill, size, font, lines,
+                bool(lines) and len(lines) > 1, box)
     # 缩到最小还放不下：仍然写，占住原框那一条。
     # 不保留原文是客户明确要求的（「折行，必须翻译，不能保留原文」），
     # 代价是这一处会偏小或伸出去一点，如实记进偏小清单。
@@ -1782,6 +1831,44 @@ def _align_center_sizes(plans):
         base = c["rect"].y1 - mid * typography.DESCENDER
         plans[i] = (c, out, fill, mid, font, lines, small,
                     _box_from(cx - w / 2.0, base, mid, w, 1))
+
+
+def _mark_right_stop(cands, gap_em=1.2):
+    """
+    标出每条文字向右最多能伸到哪 —— 同一行右侧还有别的字段时，留出字高的空。
+
+    为什么需要（2026-11-19 客户图纸第 3 页实测）：
+        底部「折叠框架上贴橡胶垫…」「2根5毫米厚铁板…」「U型槽立柱折叠框架」
+        是三个并排的字段。英文比中文长，按「向右延伸到最近障碍」的规则
+        一直长到邻居框的左边沿，只差 4pt —— 两段字挤在同一基线上，
+        读起来是「…ATTACHING RUBBER GREY PART, WIDTH 80mm PAD AND…」，
+        一句话里串了两个字段的意思。字没有压在一起，但读者会读错。
+        占用图只能判「有没有压到墨迹」，判不出「读起来是不是连成一句」。
+
+    判据：纵向中心相差半个字高以内算同一行；只认右边的邻居；
+    停到邻居左边沿再退一个多字高，退出来的空白才够断句。
+    """
+    for c in cands:
+        r = c["rect"]
+        cy = (r.y0 + r.y1) / 2.0
+        stop = None
+        for o in cands:
+            if o is c:
+                continue
+            ro = o["rect"]
+            h = max(r.height, ro.height, 1.0)
+            if abs((ro.y0 + ro.y1) / 2.0 - cy) > h * 0.6:
+                continue                      # 不在同一行
+            if ro.x0 < r.x1 - 1.0:
+                continue                      # 左边的、或与本条重叠的不算
+            if stop is None or ro.x0 < stop:
+                stop = ro.x0
+        if stop is None:
+            continue
+        # 留白按本条自己的墨迹高度算：字大字距也要大，否则小字上留的缝
+        # 挪到大字旁边又变成连着写
+        ink = c.get("ink_h") or r.height
+        c["right_stop"] = max(r.x1, stop - max(ink * gap_em, 4.0))
 
 
 def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
@@ -2161,6 +2248,17 @@ def _assign_align(page, candidates, space=None, by_size_only=False):
             #   它给 241.6），标题被判成「不居中」。
             #   而「标题居中」根本不需要知道图形中心在哪 —— 源框中心就是它该有
             #   的中心，译文保持这个中心、向两侧对称生长即可。少猜一步，少错一处。
+            #
+            # 但「最大字号档」不等于「标题」，还要排掉长得像句子的：
+            #   第 1 页根本没有视图标题，全页最大的字是底部那条
+            #   「材料：外方管…，内方管…，尺寸：…，」。按字号判它成了标题，
+            #   于是被按原框中心居中排 —— 实测左端从 127.3 跑到 72.8，
+            #   整整左移 54pt，而客户要的是「原文的位置就是译文的位置」。
+            # 三条硬筛：带冒号的是字段、带数字的是规格、超过 14 个字的是句子。
+            src = c["text"]
+            if ("：" in src or ":" in src) or re.search(r"\d", src) \
+                    or len(src) > 14:
+                continue
             c["align"] = "center"
             continue
         r = c["rect"]
@@ -2251,6 +2349,14 @@ def paint_plans(page, plans, report=None):
     # 第二轮：写译文
     changed = 0
     for c, out, _fill, size, font, lines, *_rest in plans:
+        if os.environ.get("PT_DEBUG_PAINT"):
+            import sys as _sys
+            _pl = _rest[1] if len(_rest) > 1 and _rest[1] is not None else c["rect"]
+            import traceback as _tb
+            _caller = [f.name for f in _tb.extract_stack()[:-1] if 'image_text' in f.filename][-3:]
+            print(f"[paint] sz={size:5.2f} nlines={len(lines or [])} "
+                  f"box=({_pl.x0:6.1f},{_pl.y0:6.1f},{_pl.x1:6.1f},{_pl.y1:6.1f}) "
+                  f"caller={_caller} {out[:40]!r}", file=_sys.stderr)
         tw = pymupdf.TextWriter(page.rect)
         color = tuple(float(v) / 255 for v in c["fg"])
         # 落笔矩形：第八项给了就用它，没给（旧的调用方式）退回原框
@@ -2296,8 +2402,32 @@ def rewrite_one(page, cand, out):
 
     返回是否写成。写不成说明译文还是太长、字号会缩到不可读，
     调用方据此如实报「仍未解决」，不能当作已经修好。
+
+    这里必须带占用图（space）重排，不能等闲视之 —— 2026-11-19 实测：
+    不带占用图时 _plan_strict 走的是「space is None」那条分支，直接按
+    单行原字号算出写框，宽度不受任何限制。第 3 页右侧那条
+    「5 pcs 40×80×3mm sq. tube …」重写后单行宽 494pt，从 x=683 一路写到
+    x=1178，整条冲出页面（页宽 841.92），图上看起来就是文字越框被切掉。
+    带占用图之后才走「探到障碍就折行」的正路。
     """
-    plan = _plan_one(cand, out, None)
+    space = None
+    try:
+        space = layout.PageSpace(page)
+        # 原框马上要被涂掉重写，先从占用图里释放，否则探到的第一个障碍
+        # 就是这条字自己，可用宽度恒为 0，只能一路缩字号
+        space.release_many([cand["rect"]])
+    except Exception:
+        space = None
+    # 字号口径要与首次写入一致：首次用的是渲染后实测的墨迹高度（ink_h），
+    # 不是 OCR 框高。少了这一项，同一条字重写后字号会和上一版不一样。
+    plan = _plan_one(cand, out, None, glyph_h_hint=cand.get("ink_h"),
+                     space=space)
     if plan is None:
-        return False
-    return paint_plans(page, [plan]) > 0
+        return None
+    if not paint_plans(page, [plan]):
+        return None
+    # 返回这一版实际落笔的框：打回记录要拿它更新 ink，
+    # 否则下一轮再重写时，擦除只盖住第一版的位置，新写的那版会留下残字
+    # （2026-11-19 实测第 3 页标题被连重写两次，图上留下
+    #   `TEMPORA [TEMP. BARRICADE RACK TOP VIEW] OP VIEW` 三段叠字）。
+    return plan[7] if len(plan) > 7 else cand["rect"]

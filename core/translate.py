@@ -2284,24 +2284,34 @@ class Translator:
         最后一道是校验：拿原文独立复算一遍，与译文里的数值配对比对。
         算错数的直接改成复算值，改不了的记进 metric_report 交给人看。
         """
-        masked, metas = [], []
+        masked, metas, plain = [], [], []
         for text, hint in items:
             m, pairs = self._mask_locked(text)
             masked.append((m, hint))
             metas.append(pairs)
+            # 另存一份「送去翻译的原文」，用于下面判断通道有没有真的动过它。
+            # masked 里装的是 (text, lang) 二元组，不能直接拿来跟译文比。
+            plain.append(m)
         results = self._translate_inner(masked, max_workers, progress)
-        # 翻译没成功（接口 401、超时、限流）时，通道会把入参原样返回 ——
+        # 翻译没成功（接口超时、限流、key 失效）时，通道会把入参原样返回 ——
         # 这时入参是加过遮罩的 `临时[[T0]][[T1]]俯视图`。如果照样还原遮罩，
         # 图纸上就出现 `临时 BARRICADE RACK 俯视图` 这种半中半英的东西，
         # 比完全不翻更糟：客户会以为工具把句子译坏了。
-        # 判据是「输出和送去翻译的完全一致」= 没动过，这时还原原文。
+        #
+        # 判据是「送出去什么，原样退回来什么」——
+        # 但只能判**中文**原样退回：纯数值/单位标注（`4"`、`25 lb`）本来
+        # 就不需要翻译，通道当然原样返回，把它当成失败清空，连单位换算
+        # 都跟着跳过了，图上留一个没换算的 `4"`（自检当场抓到）。
+        # 另外不能用「结果里还有占位符」当失败判据：模型保留占位符是正常
+        # 行为（实测 `Temporary [[T1]] [[T0]] Top view`），那条要还原而不是丢掉。
+        _cjk = re.compile(r"[\u4e00-\u9fff]")
         fixed = []
-        for raw, m, pairs in zip(results, masked, metas):
+        for raw, m, pairs in zip(results, plain, metas):
             r = raw or ""
             if r.strip() and r.strip() != m.strip():
                 r = self._unmask_locked(r, pairs)
-            else:
-                r = ""
+            elif r.strip() and _cjk.search(m):
+                r = ""            # 中文原样退回 = 这条没翻成
             fixed.append(r)
         results = fixed
         converted = 0
@@ -2702,6 +2712,15 @@ class Translator:
                 val, _issues = verify_metric_output(
                     src_text, val, dst=dst, page=self.page_no,
                     report=self.metric_report, mode=self.unit_mode)
+                # 重译走的是直连模型，绕开了 translate_many 的出口，
+                # 标点本地化和大小写规范要在这里补一遍。
+                # 2026-11-19 实测漏了这两道：打回重写出来的那条是
+                # 「5 pcs 40×80×3mm sq. tube …」全小写，同一张图上
+                # 其余都是全大写，一眼看出是两次不同处理写的。
+                val = typography.localize(val, dst)
+                if dst == "en":
+                    val = casing.normalize_case(
+                        val, getattr(self.glossary, "case_map", None))
                 out[i] = val
                 self.stats["llm"] += 1
                 self.retranslated = getattr(self, "retranslated", 0) + 1
