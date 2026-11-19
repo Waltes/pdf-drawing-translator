@@ -3,7 +3,7 @@
   "id": "dynamic",
   "name_zh": "PDF 翻译工具 DYNAMIC 定制版",
   "name_en": "PDF Translation Tool - DYNAMIC Edition",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "data_dir": "PDFTranslatorDynamic",
   "exe_name": "PDF翻译工具DYNAMIC定制版",
   "app_id_guid": "{6C2F1B74-3D88-4E5A-9A21-5B7E0C4D8F13}",
