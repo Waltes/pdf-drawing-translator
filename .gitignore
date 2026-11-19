@@ -86,3 +86,6 @@ _t_*.py
 # 打包中间产物（由 packaging/build_edition.py 生成）
 packaging/edition_defs.iss
 packaging/_version_info_build.txt
+
+# 压测产物：每轮一份完整 PDF + 明细日志，只在本机看，不进仓库
+_stress/

@@ -1765,7 +1765,10 @@ def process_pdf(src_path, dst_path, translate_fn, progress=None,
                 # 76-1/2" 改写成 76.5" 或 6 英尺 4 英寸 —— 一旦改写，
                 # 后面基于符号的正则换算就认不出来了。数值一律用自己算的。
                 if kind == "size":
-                    new_text = convert_units(text, unit_mode)
+                    # 尺寸标注不送翻译，但同样要统一到 mm —— 客户的
+                    # 「1.118×3.05米」如果不走翻译通道，就没人替它改了
+                    new_text = typography.unify_length(
+                        convert_units(text, unit_mode))
 
                 # 内容和原文一样（只差数字尾零、空格这些写法）就什么都别做。
                 #

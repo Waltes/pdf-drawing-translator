@@ -644,7 +644,6 @@ C形卡簧,C-CLIP,紧固
 面板,PANEL,构件
 槽钢,CHANNEL,材料
 锁定,LOCK,动作
-外侧,PUBLIC SIDE,方位
 斜撑侧,BRACE SIDE,方位
 内侧,INSIDE,方位
 外侧,OUTSIDE,方位

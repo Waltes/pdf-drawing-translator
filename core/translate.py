@@ -1460,17 +1460,41 @@ class Translator:
         这是保证术语一致性的关键：
         用户可以在 glossary.csv 里锁定译法（比如 collar 必须译成"锁紧环"），
         模型会遵守这张表，同一份图纸里同一个零件不会一会儿叫锁紧环一会儿叫卡箍。
+
+        两个方向都要查（2026-11-19 修）：
+            原来只查 en2zh，而且是把本批文字 upper() 之后去匹配英文字典 ——
+            中译英时本批文字全是中文，upper() 还是中文，**一个词都匹配不到**，
+            术语块恒为空。也就是说客户词表在中译英方向从来没有生效过，
+            同一台机器上跑三遍，塑料板、模板、折叠各写成什么全看模型当天心情。
+
+        中译英方向只喂**客户锁定词**，不喂词库里的泛词（2026-11-19 实测）：
+            一开始把 zh2en 里命中本批的词全塞进去，28 条，结果更乱 ——
+            「示意图=SCHEMATIC」让「侧面示意图1」出现 SIDE SCHEMATIC /
+            SIDE VIEW SCHEMATIC / SCHEMATIC 1, SIDE VIEW 三种写法，
+            「固定=FIXED」把 FIXING PIN 变成 FIXED PIN。
+            这些是泛词：同一个中文在句中作定语还是中心词，英文形不一样，
+            给一个固定译法反而把模型逼进死角。
+            词库的译法本来也只保证「单独成为一个标注时」成立，
+            整句里该由模型按上下文决定 —— 所以整句只保留客户拍过板的词。
         """
-        if not self.glossary.en2zh:
-            return []
-        blob = " ".join(t.upper() for t in texts)
-        hits = []
+        hits, seen = [], set()
+        locked = getattr(self.glossary, "locked", None) or {}
+        joined = "".join(t or "" for t in texts or [])
+        blob = " ".join((t or "").upper() for t in texts or [])
+
+        # 1) 客户锁定的叫法：只要原文里出现就带上。中译英方向就只给这一组。
+        for zh, (want, _wrongs) in locked.items():
+            if zh and zh in joined and zh not in seen:
+                hits.append((zh, want))
+                seen.add(zh)
+
+        # 2) 英译中：英文术语 → 中文译法（原逻辑，界面上锁的译法就靠它生效）
         for en, zh in self.glossary.en2zh.items():
-            if len(en) < 2 or " " in en and len(en) > 24:
+            if len(en) < 2 or ((" " in en) and len(en) > 24) or en in seen:
                 continue
-            # 只取真正出现在本批文字中的词，避免把整本词典塞进请求里烧 token
             if re.search(r"(?<![A-Z])" + re.escape(en) + r"(?![A-Z])", blob):
                 hits.append((en, zh))
+                seen.add(en)
                 if len(hits) >= limit:
                     break
         hits.sort(key=lambda p: -len(p[0]))
@@ -1703,12 +1727,18 @@ class Translator:
         hints = self._glossary_hints([b[0] for b in batch])
         term_block = ""
         if hints:
+            # 措辞从「必须严格遵守」放宽成「优先采用、同一份文件内保持一致」：
+            # 词库里有错的（实测「外侧=PUBLIC SIDE」），硬压会把错译固定下来；
+            # 而客户锁定词本来就靠遮罩保证，不指望这句话。
             if i18n.is_en():
-                term_block = ("\nReference glossary (these renderings are mandatory, do not invent "
-                              "your own):\n" + "; ".join(f"{en}={zh}" for en, zh in hints))
+                term_block = ("\nTerminology already used in this batch — keep the same rendering "
+                              "throughout the whole document, do not switch to synonyms "
+                              "(prefer the form given here):\n" +
+                              "; ".join(f"{s}={d}" for s, d in hints))
             else:
-                term_block = "\n参考术语表（这些词的译法必须严格遵守，不许自创）：\n" + \
-                             "；".join(f"{en}={zh}" for en, zh in hints)
+                term_block = ("\n参考术语表（这些词在本批出现过。同一份文件内必须保持同一译法，"
+                              "不要换同义词；优先采用表中写法）：\n" +
+                              "；".join(f"{s}={d}" for s, d in hints))
 
         payload = [{"id": i, "text": t, "target": i18n.prompt_name(d)}
                    for i, (t, _s, d) in enumerate(batch)]
@@ -2367,6 +2397,13 @@ class Translator:
             if fixed != new:
                 results[i] = fixed
                 new = fixed
+            # 长度单位统一到 mm（客户 2026-11-19 拍板）。
+            # 放在换算之后：换算只处理英制→公制，管不了「米还是毫米」；
+            # 放在 verify 之后：复算是拿原文比数值，先改写法会被判成「数值不符」。
+            uni = typography.unify_length(new)
+            if uni != new:
+                results[i] = uni
+                new = uni
             # 标点本地化 + 大小写规范。放在锁定词之后、所有通道之外的同一位置，
             # 理由和锁定词一样：三条通道各有各的出口，逐个加必然漏。
             #
@@ -2717,6 +2754,13 @@ class Translator:
                 # 2026-11-19 实测漏了这两道：打回重写出来的那条是
                 # 「5 pcs 40×80×3mm sq. tube …」全小写，同一张图上
                 # 其余都是全大写，一眼看出是两次不同处理写的。
+                # 长度统一到 mm。重译这条路上漏过一次（2026-11-19 实测：
+                # 「材料：…尺寸：1.118*3.05米」批量这一遍判失败，图上那条字
+                # 是重译写进去的，带着 `SIZE: 1.118×3.05m` 留在第 1 页，
+                # 而同一份文件别处已经是 1103mm、3050mm —— 一份图两种长度单位）。
+                # 凡是 translate_many 出口做的规范化，这里一个都不能少：
+                # 重译是绕开通道直连模型的，出口没有第二道网。
+                val = typography.unify_length(val)
                 val = typography.localize(val, dst)
                 if dst == "en":
                     val = casing.normalize_case(
