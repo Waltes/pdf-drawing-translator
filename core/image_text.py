@@ -19,6 +19,7 @@
   翻不出来的会记进未译清单，如实报给用户，不假装成功。
 """
 
+import math
 import os
 import re
 
@@ -90,6 +91,31 @@ MIN_CONTRAST = 34     # 文字与背景的最小亮度差，太接近说明识�
 # 是一道灰线。真正判定「小到不能要」的界线放在 typography.MIN_READABLE，
 # 这里跟着它走，文字层与位图层用同一个数，不各写一份。
 MIN_WRITE_SIZE = typography.MIN_READABLE
+
+# 文字朝向的三档分界（度）。取值全部来自 7 份客户图纸的实测分布：
+#   横排抖动 —— 实测 0~1.5°，偶尔 2°，留到 12° 绝不会误判；
+#   竖排误框 —— 竖排标注被 OCR 框成略斜的四边形，实测 5.9°、6.8°。
+#              这一档必须判成竖排（走 _plan_vertical），不能当斜排 ——
+#              斜排路径是「沿任意角铺开」，用在竖排上会把字写歪几度，
+#              跟旁边的尺寸线不再平行，比原来的问题更显眼；
+#   真斜排   —— 实测 21.2°、22.2°（沿斜管/引线的半径标注）。
+SLANT_MIN = 12.0      # 起算斜排的角度
+SLANT_MAX = 78.0      # 超过这个角度算竖排（走竖排那条路）
+# 竖排的兜底判据：OCR 有时把竖排框成轴对齐矩形，角度是 0，只剩长宽比可用。
+# 判据从「宽 < 高/1.5」放宽到「宽 < 高×0.9」：实测竖排 70mm 的框是
+# 15.0×21.7（1.45），按老阈值判成横排，于是这条竖排标注被水平重写，
+# 一条 70mm 横躺在尺寸线旁边 —— 客户报的「竖的字变横的」就是这个。
+VERT_ASPECT = 0.9
+
+# 斜排的二次复核（见 _ink_axis）。OCR 四边形只在「一条字斜着写」时可信；
+# 它把两行水平字框成一条时给的角度纯属噪声（实测 -28.5°，写出来直接冲出页面）。
+# ratio 要够细长才算一条线，角度要和墨迹主轴对得上才算同一件事。
+#
+# 阈值 3.0 是两个实测值之间取的：真斜排 5.23（合成图 24°，一条 8 字中文），
+# 两行水平字被框成一条时 2.18（护栏图纸那条 032*2mm圆管）。取 2.0 会把后者
+# 放进来 —— 那条按 28.5° 写回去，69pt 长的标注立刻斜着冲出页顶。
+SLANT_RATIO = 3.0
+SLANT_TOL = 22.0
 
 _ocr_engine = None
 _font_cjk = None
@@ -815,9 +841,18 @@ def _merge_paragraphs(cands, x_em=0.5, right_em=0.8, gap_em=(-0.4, 2.0)):
     """
     if len(cands) < 2:
         return cands
+    # 竖排/斜排不参与段落合并：这条规则的每一条判据（左端对齐、行宽收窄）
+    # 都是按水平折行推出来的，竖排文字「左端对齐」在竖直方向上是另一回事，
+    # 合起来会把尺寸线上互不相干的几条标注串成一句。
     order = sorted(cands, key=lambda c: (c["rect"].y0 + c["rect"].y1) / 2)
     out, cur = [], []
     for c in order:
+        if c.get("vertical") or c.get("angle"):
+            if cur:
+                out.extend(_fold_paragraph(cur))
+                cur = []
+            out.append(c)
+            continue
         if not cur:
             cur = [c]
             continue
@@ -878,6 +913,7 @@ def _fold_paragraph(lines):
     return [{"text": text, "rect": rect, "bg": first.get("bg"),
              "fg": first.get("fg"), "hint": ocr_lang(text),
              "vertical": first.get("vertical", False),
+             "angle": first.get("angle", 0.0),
              "ink_h": max(sizes) if sizes else 0.0, "ink_box": ink}]
 
 
@@ -915,6 +951,7 @@ def _join_split(a, b):
         ink = pymupdf.Rect(ia or ib)
     return {"text": text, "rect": rect, "bg": a.get("bg"), "fg": a.get("fg"),
             "hint": ocr_lang(text), "vertical": a.get("vertical", False),
+            "angle": a.get("angle", 0.0),
             "ink_h": max(a.get("ink_h") or 0.0, b.get("ink_h") or 0.0),
             "ink_box": ink}
 
@@ -984,6 +1021,33 @@ def _merge_split_labels(cands, gap_em=0.6, row_em=0.35):
                 merged.append(c)
         out.extend(merged)
     return out
+
+
+def _quad_angle(box):
+    """
+    OCR 检测框给的方向角（度），-90~90。
+
+    为什么能拿到角度：RapidOCR 的检测框本来就是一个四边形，斜着写的标注
+    框也是斜的 —— 旧代码只取 min/max 拼成轴对齐矩形，顺手把这个信息丢了，
+    于是斜排和横排在下游看起来一模一样，永远按水平重写。
+
+    取 p0→p1 这条边：点序是「左上、右上、右下、左下」，这条边与文字基线
+    平行，就是文字走向。屏幕坐标 y 向下，所以「从左下往右上写」是负角。
+
+    噪声：竖排标注会被检测成略斜的框（实测 5.9°、6.8°），横排也有 1~2° 抖动。
+    所以调用方要按阈值分档，不能见到非零角度就当斜排。
+    """
+    try:
+        (x0, y0), (x1, y1) = box[0], box[1]
+        a = math.degrees(math.atan2(y1 - y0, x1 - x0))
+    except Exception:
+        return 0.0
+    # 归到 -90~90：atan2 给的是 -180~180，且点序反了会得到 180° 附近的值
+    while a > 90:
+        a -= 180
+    while a <= -90:
+        a += 180
+    return a
 
 
 def _fix_ink_for_slanted(text, ink_h, rect):
@@ -1112,15 +1176,36 @@ def process_page_images(page, translate_fn, used_rects, report,
                     untranslated.append(("图片内文字", text))
                 continue
 
-            # 竖排还是横排：OCR 返回的框是轴对齐矩形，给不出文字朝向，
-            # 只能靠长宽比认。竖排的是尺寸线旁边的旋转标注（制图标准里
-            # 逆时针 90°，从下往上读），横排的是普通说明。
-            # 这一步必须区分：竖排框宽度只有十几点，若当水平文字排版，
-            # 可排版长度就等于框宽，几百点长的英文译文会把字号压到 1 点，
-            # 图上看着就是一片空白 —— 客户报的就是这个。
+            # 文字朝向：横排 / 竖排 / 斜排三档。
+            #
+            # 判据分两层，缺一层都会出错：
+            #   第一层看 OCR 四边形本身的角度（_quad_angle）。这是唯一可靠的
+            #   斜排证据 —— 框是斜的，说明这一串字是斜着写的。
+            #   第二层看长宽比，只用来兜竖排：OCR 对竖排常常给的是轴对齐矩形
+            #   （角度 0），这时没有角度可用，只能看「是不是竖着长」。
+            #
+            # 为什么必须分清楚：竖排框只有十几点宽，当成横排排版，几百点长的
+            # 译文会把字号压到 1 点，图上是一块白斑（客户报的就是这个）；
+            # 斜排若当成横排，字会被水平写回去，与旁边斜着的引线、管子脱开，
+            # 一眼就能看出是后贴上去的。
             bw = max(xs) - min(xs)
             bh = max(ys) - min(ys)
-            vertical = bh > bw * 1.5
+            _ang = _quad_angle(box)
+            if abs(_ang) >= SLANT_MAX:
+                vertical, slant = True, 0.0
+            elif abs(_ang) >= SLANT_MIN:
+                # OCR 说这条是斜的，先问一句墨迹自己：真是一条细长的斜字吗。
+                # 不做这一步，OCR 把两行水平字框成一条时那个角度会被当真
+                # （实测 -28.5°），一条 69pt 的标注斜着冲出页面顶部。
+                real, ratio = _ink_axis(rgb, clip, txt_rect, zoom)
+                if ratio >= SLANT_RATIO and abs(real - _ang) <= SLANT_TOL:
+                    vertical, slant = False, _ang
+                else:
+                    vertical, slant = False, 0.0
+            elif bw < bh * VERT_ASPECT:
+                vertical, slant = True, 0.0
+            else:
+                vertical, slant = False, 0.0
 
             bg, fg, _std = sampled
             # 实测墨迹高度与水平范围：字号要跟原字一样高就得知道原字多高，
@@ -1138,6 +1223,14 @@ def process_page_images(page, translate_fn, used_rects, report,
                     hint = ocr_lang(text)
             candidates.append({"text": text, "rect": txt_rect, "bg": bg,
                                "fg": fg, "hint": hint, "vertical": vertical,
+                               "angle": slant,
+                               # 四边形原样留着：斜排的字身方向、轴向长度、
+                               # 擦除范围都得靠它算 —— 轴对齐框的投影里混着
+                               # 两个分量，斜着量一定偏大（实测引线被框进来，
+                               # 擦除时啃掉一截）。
+                               "quad": [pymupdf.Point(clip.x0 + p[0] / zoom,
+                                                      clip.y0 + p[1] / zoom)
+                                        for p in box],
                                "ink_h": _fix_ink_for_slanted(text, _ink[0],
                                                              txt_rect),
                                "ink_box": _ink[1]})
@@ -1158,7 +1251,10 @@ def process_page_images(page, translate_fn, used_rects, report,
         for _c in sorted(candidates, key=lambda x: (x["rect"].y0, x["rect"].x0)):
             _r = _c["rect"]
             print(f"[cand] ({_r.x0:6.1f},{_r.y0:6.1f})-({_r.x1:6.1f},{_r.y1:6.1f})"
-                  f" ink={_c.get('ink_h', 0):5.1f} {_c['text']!r}", file=_sys.stderr)
+                  f" ink={_c.get('ink_h', 0):5.1f}"
+                  f" ang={_c.get('angle', 0):5.1f}"
+                  f" v={int(bool(_c.get('vertical')))}"
+                  f" {_c['text']!r}", file=_sys.stderr)
 
     # 批量翻译（图片文字少但页多，逐条串行会把总时间拖长一倍）
     # 源的语种用每条自己的 hint，不再硬编码 "en"：中文图纸的标注传 en 进去，
@@ -1328,6 +1424,56 @@ def _measure_ink_h(rgb, clip, box, zoom):
     return ink_h, ink_box
 
 
+def _ink_axis(rgb, clip, box, zoom):
+    """
+    框内墨迹的主轴方向和「细长程度」。用来复核 OCR 给的斜排角度。
+
+    为什么需要复核（2026-11-19 护栏图纸实测）：
+        `032*2mm圆管 / ROUND TUBE` 是两行水平字，OCR 却给了一个 -28.5° 的
+        四边形。按角度判成斜排、旋转 28° 写回去，一条 69pt 长的标注立刻
+        斜着冲出页面顶部（y=-2.3），复核抓出「越界 1 处」。
+        OCR 的四边形只在「一条文字斜着写」时可信；它把两行字框成一条时，
+        四条边给出的角度没有意义。
+
+    判据两条，都要满足才算真斜排：
+      · 主轴必须细长 —— 单行文字的墨迹沿走向铺开，长度远大于字高；
+        两行水平字堆在一起像个方块，长短轴差不多（本函数返回的 ratio 小）。
+      · 主轴角度要和 OCR 给的角度基本一致 —— 差得远说明四边形不可信。
+
+    返回 (角度, ratio)。角度按主轴向量算，归到 -90~90；ratio 是
+    长短轴标准差之比，1.0 表示是个圆（谈不上方向）。
+    """
+    np = _numpy()
+    try:
+        x0 = max(int((box.x0 - clip.x0) * zoom), 0)
+        y0 = max(int((box.y0 - clip.y0) * zoom), 0)
+        x1 = min(int((box.x1 - clip.x0) * zoom), rgb.shape[1])
+        y1 = min(int((box.y1 - clip.y0) * zoom), rgb.shape[0])
+        sub = rgb[y0:y1, x0:x1]
+        if sub.size == 0:
+            return 0.0, 1.0
+        dark = sub.min(axis=2) < 180
+        ys, xs = np.nonzero(dark)
+        if len(xs) < 24:
+            return 0.0, 1.0
+        xs = xs.astype(float) - xs.mean()
+        ys = ys.astype(float) - ys.mean()
+        cov = np.cov(np.vstack([xs, ys]))
+        w, v = np.linalg.eigh(cov)      # 升序：w[1] 是主轴方差
+        major, minor = float(w[1]), float(w[0])
+        if major <= 0:
+            return 0.0, 1.0
+        ratio = math.sqrt(major / max(minor, 1e-6))
+        ang = math.degrees(math.atan2(float(v[1, 1]), float(v[0, 1])))
+        while ang > 90:
+            ang -= 180
+        while ang <= -90:
+            ang += 180
+        return ang, ratio
+    except Exception:
+        return 0.0, 1.0
+
+
 def _assign_size_classes(candidates, outs):
     """
     把原件里「一样大」的文字归成一类，同类译文用一个字号。
@@ -1347,6 +1493,12 @@ def _assign_size_classes(candidates, outs):
     items = []
     for c, out in zip(candidates, outs):
         if not out or not out.strip():
+            continue
+        # 斜排不参与同类归堆：它的墨迹高是「框宽 ÷ 每字宽」反推出来的估计值，
+        # 跟横排直接量到的墨迹高不是一个量，塞进同一堆会把整类的目标高度拽偏，
+        # 结果一页横排标题跟着斜着那条标注一起改字号。
+        if c.get("angle"):
+            c["cls_ink"] = None
             continue
         vertical = c.get("vertical", False)
         h = c.get("ink_h")
@@ -1972,6 +2124,10 @@ def _plan_one(c, out, untranslated=None, font_cjk=None, font_latin=None,
         # 注意不能把 glyph_h_hint 传进去：竖排的 ink_h 量的是沿轴向的长度
         # （这份图纸 84pt），不是字高。字高由 _plan_vertical 自己按列宽算。
         return _plan_vertical(c, out, font, fill, space, untranslated)
+    if c.get("angle"):
+        # 斜排走同一条思路（2026-11-19 客户定）：轴向是斜的，两头同样被夹住，
+        # 同样只有缩字号一个动作。区别只在写入时要带旋转 —— 见 _plan_slant。
+        return _plan_slant(c, out, font, fill, space, untranslated)
     want_ink = glyph_h_hint or (r.height * 0.85)
 
     # 定制版走严格原位（字号锁死、位置锁死、只许向右长、放不下才折行）。
@@ -2257,9 +2413,11 @@ def _plan_vertical(c, out, font, fill, space, untranslated):
     # 这里按剔掉线之后的那条列重新给框，右侧只留 0.2pt 余量。
     vfill = pymupdf.Rect(col_x0 - 0.6, ink.y0 - 0.6, col_x1 + 0.2, ink.y1 + 0.6)
 
-    # 上限给 400pt：A3/A2 图纸上单条竖排标注再长也到不了这个数，
-    # 真到了说明这一列上下全是空白，让它长就是，占用图会兜住。
-    LIMIT = 400.0
+    # 上限跟着原字长走，不设固定 400。纯空白处（孤立标注、合成图）两侧都探到
+    # 上限，居中后整条标注被挪到几百点之外 —— 实测合成图上「上下调节100mm」
+    # 从 y≈160 挪到了 y≈430，跟旁边的竖线彻底脱开。
+    # 真实图纸上下都有尺寸线挡着，量多少是多少；没有障碍时按原字长封顶。
+    LIMIT = max(ink.height * 1.2, 60.0)
     up = _span_from(space, col_x0, col_x1, ink.y0, -1, LIMIT, vfill)
     down = _span_from(space, col_x0, col_x1, ink.y1, +1, LIMIT, vfill)
     avail = ink.height + up + down
@@ -2304,6 +2462,184 @@ def _plan_vertical(c, out, font, fill, space, untranslated):
     soft_pt = max(typography.readable_floor(glyph_h),
                   glyph_h * typography.SHRINK_FLOOR)
     return (c, out, vfill, size, font, None, size < soft_pt, place)
+
+
+def _plan_slant(c, out, font, fill, space, untranslated):
+    """
+    斜排标注的排版：跟竖排同一条思路，轴向从竖直换成「原文字走向」。
+
+    竖排的规则是（2026-11-19 客户定）：两头被夹死，只有缩字号这一个动作，
+    量出这条带子还能占多长，把字号缩到刚好装下。斜排完全一样 ——
+    R35mm、Ø12mm 这种沿引线斜写的半径标注，两头同样是引线端点和相邻图元，
+    既不能横着长出去，也不能改方向，能动的只有字号。
+
+    为什么不能沿用横排那套：横排是「原位 + 向右延伸 + 放不下就折行」。
+    斜排用它会出两个错，都是这一版要消掉的：
+      · 字写成水平的，方向没了 —— 原文沿 22° 引线写着，译文横躺在引线上，
+        跟引线成一个夹角，一眼就看出是后贴的；
+      · 折行更离谱 —— 两行水平字叠在一个斜着的狭长区域里，第二行必然压到
+        引线或者旁边的尺寸线上。
+
+    三个量都要在「斜坐标系」里算，用轴对齐矩形量会全错：
+      · 轴向长度 L 与字高 h —— 直接取 OCR 四边形投影到 u/v 的跨度。
+        四边形是贴着字给的，投影出来就是这条标注的真实长宽；
+      · 两端界限 —— 沿 u 逐点探（PageSpace.clear_along），遇到线条就停。
+
+    2026-11-19 合成图实测修三处（真实图纸里斜排都太短，暴露不出来）：
+      · 借空白要「按需借、两边对称」。原来两侧各探 400pt，左边撞上引线
+        立刻停、右边全是空白，于是中心一路右移 200pt，文字飞到引线端点
+        以外，跟原标注脱开。现在先看译文按原字号需不需要变长，需要多少
+        就在两侧对称借多少，一侧不够由另一侧补。
+      · 从中心探到障碍的距离里含着半个字长（自己那一半），要扣掉。
+        不扣的话「两端可用长度」凭空多出一个字长，字号算大。
+      · 擦除区按 OCR 四边形给，不再用墨迹框投影。墨迹框是轴对齐的，
+        引线从框里穿过去也算成墨迹，擦的时候会把引线啃掉一截（实测）。
+
+    装不下就缩，缩到硬下限还装不下才留原文并如实报未译 —— 与竖排一致。
+    """
+    ang = float(c.get("angle") or 0.0)
+    th = math.radians(ang)
+    ux, uy = math.cos(th), math.sin(th)     # 文字走向（屏幕坐标，y 向下）
+    vx, vy = -uy, ux                        # 字身方向
+
+    ink = c.get("ink_box") or c["rect"]
+    if ink is None or ink.is_empty:
+        ink = c["rect"]
+
+    quad = c.get("quad")
+    if quad and len(quad) == 4:
+        # 四边形贴合文字本身：u 方向跨度 = 轴向长度，v 方向跨度 = 字身高度
+        cs = [(p.x, p.y) for p in quad]
+        tight = True
+    else:
+        # 没有四边形（复核重写、合并后的候选）：退回轴对齐墨迹框，
+        # 投影值一定偏大，字高再用 ink_h 压回来
+        cs = [(ink.x0, ink.y0), (ink.x1, ink.y0),
+              (ink.x1, ink.y1), (ink.x0, ink.y1)]
+        tight = False
+    su = [x * ux + y * uy for x, y in cs]
+    sv = [x * vx + y * vy for x, y in cs]
+    u0, u1 = min(su), max(su)
+    v0, v1 = min(sv), max(sv)
+    L = max(u1 - u0, 1.0)
+    h_proj = max(v1 - v0, 1.0)
+
+    if tight:
+        # 四边形带一圈留白，按 0.9 折回字身高度（与横排「框高×0.85」同量级）
+        h = h_proj * 0.9
+    else:
+        h = c.get("ink_h") or 0.0
+        if h <= 0 or h > h_proj:
+            h = h_proj
+    h = max(min(h, L), 1.0)
+
+    cxm = (ink.x0 + ink.x1) / 2.0
+    cym = (ink.y0 + ink.y1) / 2.0
+
+    def _own(x, y):
+        """这个点是不是本条自己的原墨迹（量界限时要当空）。"""
+        lu = x * ux + y * uy
+        lv = x * vx + y * vy
+        return (u0 - 0.5) <= lu <= (u1 + 0.5) and (v0 - 0.5) <= lv <= (v1 + 0.5)
+
+    # 字高的一半是「从中心走到自己这一端」的距离，探出来的距离要扣掉它
+    half_L = L / 2.0
+    LIMIT = 400.0
+    half_h = max(h * 0.42, 0.6)
+    if space is not None:
+        up_raw = max(0.0, space.clear_along(
+            (cxm, cym), (-ux, -uy), half_h, LIMIT, keep=_own) - half_L)
+        dn_raw = max(0.0, space.clear_along(
+            (cxm, cym), (ux, uy), half_h, LIMIT, keep=_own) - half_L)
+    else:
+        # 没有占用图（复核重写、离线调用）时按「原字两端各借一个字高」估。
+        # 不估的话这里只能硬塞进 L，一条 6 个字符的标注立刻被判装不下。
+        up_raw = dn_raw = h
+
+    size = typography.size_for_ink(font, out, h)
+    need0 = font.text_length(out, fontsize=size)
+    if need0 <= 0:
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
+    # 借空白按需、对称：译文按原字号比原位长多少，就在两侧各借一半。
+    # 原位装得下就一点不借 —— 这样短标注（R35mm、Ø12mm 这种）绝不会挪位。
+    if need0 <= L:
+        up = dn = 0.0
+    else:
+        want = need0 - L
+        up = min(up_raw, want / 2.0)
+        dn = min(dn_raw, want / 2.0)
+        rest = want - up - dn
+        if rest > 0:
+            # 一侧还有富余就补上，两边都没有就认了（下面会缩字号）
+            spare_up, spare_dn = up_raw - up, dn_raw - dn
+            add = min(rest, max(spare_up, spare_dn))
+            if spare_up >= spare_dn:
+                up += add
+            else:
+                dn += add
+    avail = L + up + dn
+    need = need0
+
+    if os.environ.get("PT_DEBUG_V"):
+        import sys as _s
+        print("[slant] %.1f° L=%.1f h=%.1f avail=%.1f(上%.1f/下%.1f) "
+              "need=%.1f size=%.2f" % (ang, L, h, avail, up, dn, need, size),
+              file=_s.stderr)
+
+    if need > avail:
+        # 长度与字号成正比，一次除法即可（同竖排）
+        size = max(size * avail / need * 0.998, typography.MIN_SIZE)
+        need = font.text_length(out, fontsize=size)
+    if need > avail + 0.05:
+        if untranslated is not None:
+            untranslated.append(("图片内文字", c["text"]))
+        return None
+
+    # 落点：在「原字 + 两端借到的空白」这一段里居中，方向仍是原走向。
+    # start = 这一段的中点沿 -u 退回半个文字长度。
+    mid_d = (dn - up) / 2.0
+    sx = cxm + ux * mid_d - ux * need / 2.0
+    sy = cym + uy * mid_d - uy * need / 2.0
+
+    # 擦除区域用旋转四边形：轴对齐外接框会把斜框外的图形一起涂掉。
+    # 外扩 0.6 是为了盖住笔画的抗锯齿边，竖排那边也是这个量级。
+    pads = 0.6
+    q = []
+    for lu, lv in ((u0 - pads, v0 - pads), (u1 + pads, v0 - pads),
+                   (u1 + pads, v1 + pads), (u0 - pads, v1 + pads)):
+        q.append(pymupdf.Point(lu * ux + lv * vx, lu * uy + lv * vy))
+    bbox = pymupdf.Rect(min(p.x for p in q), min(p.y for p in q),
+                        max(p.x for p in q), max(p.y for p in q))
+    if space is not None:
+        space.reserve(bbox)
+
+    # 落笔信息不能塞进返回元组的 Rect —— 起点和角度都在它之外。
+    # 挂在候选上（同一个 dict 会一路传到 paint_plans），paint 里有就用。
+    c["slant_paint"] = {"x": sx, "y": sy, "size": size, "angle": ang}
+    c["slant_fill"] = q
+
+    # 第八项（place）要给**实际写出去的范围**，不是原框。
+    # 复核是照着它回读文字的：译文常比原文长（中文 7 字 → 英文 21 字符），
+    # 拿原文那个框去读，只读得到落在框内的头几个字，于是「明明写上了」
+    # 被判成空白块 → 打回重译 → 再写一遍，图上就成了两条平行的斜字
+    # （2026-11-19 合成图实测：want='RADIUS35' got='A\nA\n'）。
+    wt = h        # 字身高度，基线往 -v 方向长
+    ecs = [(sx, sy),
+           (sx + ux * need, sy + uy * need),
+           (sx + ux * need - vx * wt, sy + uy * need - vy * wt),
+           (sx - vx * wt, sy - vy * wt)]
+    place = pymupdf.Rect(
+        min(p[0] for p in ecs) - 1.0, min(p[1] for p in ecs) - 1.0,
+        max(p[0] for p in ecs) + 1.0, max(p[1] for p in ecs) + 1.0)
+
+    soft_pt = max(typography.readable_floor(h), h * typography.SHRINK_FLOOR)
+    # 第三个返回值（fill）给的是外包框，只当「这条占哪儿」用；
+    # 真正擦除时 paint_plans 会优先用 slant_fill 那个四边形 —— 轴对齐矩形
+    # 会把斜框外的引线、尺寸线一起涂掉，那正是这一版要避免的。
+    return (c, out, bbox, size, font, None, size < soft_pt, place)
 
 
 def _content_center(rects, r, ink, space=None):
@@ -2518,6 +2854,14 @@ def paint_plans(page, plans, report=None):
     # 灰色轮廓，比白块更难看（隔离测试可复现）。所以这里回到矩形填充，
     # 改成把矩形收紧到原字的实际墨迹范围（见 _fill_rect），不再连坐周边图线。
     for c, _out, fill, *_rest in plans:
+        # 斜排的盖字区是旋转四边形，不能用矩形：轴对齐外包会把斜框外的
+        # 引线、尺寸线一起涂掉（实测那条 22° 半径引线会被啃掉一截）。
+        q = c.get("slant_fill")
+        if q:
+            page.draw_polyline(q, color=None, closePath=True,
+                               fill=tuple(float(v) / 255 for v in c["bg"]),
+                               width=0)
+            continue
         page.draw_rect(fill, color=None,
                        fill=tuple(float(v) / 255 for v in c["bg"]), width=0)
 
@@ -2538,7 +2882,25 @@ def paint_plans(page, plans, report=None):
         place = _rest[1] if len(_rest) > 1 and _rest[1] is not None else c["rect"]
         # 基线不能贴框底，要往下留出 y/g/p 的下伸部 —— 落了就压到框下的图线上
         base_y = place.y1 - size * typography.DESCENDER
-        if c.get("vertical"):
+        sp = c.get("slant_paint")
+        if sp:
+            # 斜排：起点和角度都是 _plan_slant 在斜坐标系里算好的（place 那个
+            # 轴对齐框给不出起点，也没法表达角度）。morph 用 pivot + 旋转矩阵：
+            # 矩阵把水平写法整体转过去，pivot 就是文字起点，转完仍然从那儿起。
+            #
+            # 符号必须按 PDF 文本空间的 y 方向算，不能按屏幕坐标直接套：
+            # 文本空间 y 向上、页面坐标 y 向下，所以文本 (1,0) 投到页面上是
+            # (a, -b) 而不是 (a, b)。写成 Matrix(cos, sin, -sin, cos) 会让
+            # −24° 的标注朝右下写（实测 bbox 落在 pivot 下方 50pt），跟引线夹角
+            # 变成两倍，位置也全错 —— 正确的 23 度标注要先加负号再进矩阵。
+            # 竖排用的 Matrix(90) 同理：(a,-b)=(0,-1) 向上，与「文字向上生长」一致。
+            th = math.radians(sp["angle"])
+            pivot = pymupdf.Point(sp["x"], sp["y"])
+            mat = pymupdf.Matrix(math.cos(th), -math.sin(th),
+                                 math.sin(th), math.cos(th), 0, 0)
+            tw.append(pivot, out, font=font, fontsize=size)
+            tw.write_text(page, color=color, morph=(pivot, mat))
+        elif c.get("vertical"):
             # 竖排标注逆时针 90° 写回：以落点框右下角为 baseline 起点，
             # 文字向上生长，字身落在基线左侧，正好覆盖原框。
             # Matrix(90) 在 y 轴向下的坐标系里是逆时针 90°，
@@ -2595,6 +2957,13 @@ def rewrite_one(page, cand, out):
         # 就是这条字自己，可用宽度恒为 0，只能一路缩字号
         space.release_many([cand["rect"]])
     except Exception:
+        space = None
+    if cand.get("angle"):
+        # 斜排重写不带占用图。它不是「在框里缩」，而是「沿斜轴借空白」——
+        # 而此刻页面上还压着上一版写的那行字，探测第一步就撞上它，
+        # 借不到空白、落点还被推偏，于是两版错开叠着（实测合成图上是两条
+        # 平行的 "RADIUS 35mm ROUND TUBE"）。上一版由调用方先擦掉
+        # （见 pdf_engine._rewrite_record 的 stale），这里按原位重排即可。
         space = None
     # 字号口径要与首次写入一致：首次用的是渲染后实测的墨迹高度（ink_h），
     # 不是 OCR 框高。少了这一项，同一条字重写后字号会和上一版不一样。

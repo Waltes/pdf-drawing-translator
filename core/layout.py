@@ -219,6 +219,46 @@ class PageSpace:
             return pymupdf.Rect()
         return pymupdf.Rect(f.x0 + pad, f.y0 + pad_y, f.x1 - pad, f.y1 - pad_y)
 
+    def occupied_point(self, x, y):
+        """
+        单个点（PDF 坐标）上有没有东西。出界一律算有。
+
+        为什么要有单点查询：斜排标注的界限只能沿斜方向量，而 is_clear 收的是
+        轴对齐矩形 —— 斜着的一条线放进轴对齐矩形里，外接框会大到把旁边的
+        空白也算成占用，界限永远量成 0。这里退到像素级，沿任意方向逐点查。
+        """
+        ix = int((x - self._origin[0]) * self.scale)
+        iy = int((y - self._origin[1]) * self.scale)
+        if not (0 <= ix < self._w and 0 <= iy < self._h):
+            return True
+        return bool(self._occ[iy, ix])
+
+    def clear_along(self, p0, u, half_h, limit, step=1.0, keep=None):
+        """
+        从 p0 沿方向 u（单位向量）能走多远，走到碰见东西为止。
+
+        探法：沿 u 每走 step，在垂直方向 ±half_h 上取 5 个点查一次。
+        取 5 个点是量的取舍 —— 一条 1pt 的尺寸线在 150dpi 下只有 2 个像素宽，
+        只查中心点会从线缝里穿过去；5 个点分布在字身高度上，穿不过去，
+        又比逐像素扫快点几十倍。
+
+        keep(x, y) 返回 True 表示这个点属于「本条自己的原墨迹」、要当作空的。
+        不传的话，原字自己的笔画第一步就把路堵死，量出来永远是 0。
+        """
+        d = 0.0
+        nx, ny = -u[1], u[0]        # 垂直方向（左右都一样，取正负对称采样）
+        while d < limit:
+            d += step
+            cx, cy = p0[0] + u[0] * d, p0[1] + u[1] * d
+            for t in (-1.0, -0.5, 0.0, 0.5, 1.0):
+                x = cx + nx * half_h * t
+                y = cy + ny * half_h * t
+                if keep is not None and keep(x, y):
+                    continue
+                if self.occupied_point(x, y):
+                    return max(0.0, d - step)
+        return limit
+
     def occupied_span(self, window):
         """
         window 这个窗口里，有内容的那部分横向范围（PDF 坐标）。没内容返回 None。

@@ -1266,6 +1266,12 @@ def _rewrite_record(doc, rec, new_text):
                 return False
             # 记下这一版的写框，下一轮重写要按它擦 —— 不更新就会留下残字
             rec["ink"] = [r for r in (rec.get("rect"), box) if r is not None]
+            # mark 的 ink 也要跟着换：复核是拿 mark 回读文本的，
+            # 留着上一版的位置去读，读到的可能是被擦掉的空白或者上一版的残字，
+            # 于是「明明写上了」被判空白块，再打回一轮 —— 斜排那条标注
+            # 就是这么被写成两版的（2026-11-19 合成图实测）。
+            if rec.get("mark") is not None:
+                rec["mark"]["ink"] = list(rec["ink"])
             return True
         if rec.get("kind") == "decl":
             # 声明格没有「翻译」可重做，重写就是按同一套规则再写一遍。

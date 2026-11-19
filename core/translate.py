@@ -69,6 +69,18 @@ HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
 LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
 NUM_RE = re.compile(r"\d+(?:[.\-/]\d+)*")
 
+# 月份的两种写法对照。日期校验专用 —— 数字保真规则要求「原文有 11，译文就得有 11」，
+# 但中文日期 2026年11月16日 译成 November 16, 2026 是完全正确的英文写法，
+# 里面根本没有「11」这个数字。按纯数字比对会把日期整条判成「数字对不上」，
+# 客户看到的就是一句没翻的日期（实测 2026-11-19 截图确认）。
+# 序号即月份，1~12 直接索引。
+_MONTH_WORDS = (
+    ("january", "jan"), ("february", "feb"), ("march", "mar"),
+    ("april", "apr"), ("may", "may"), ("june", "jun"),
+    ("july", "jul"), ("august", "aug"), ("september", "sept", "sep"),
+    ("october", "oct"), ("november", "nov"), ("december", "dec"),
+)
+
 # 公制长度单位 → 毫米的换算表，只为「数字保真」校验服务，不参与任何实际改写。
 # 为什么需要它：中文图纸写「2.79米长」，模型按图纸习惯改写成「2790.00 mm」，
 # 这是完全正确的换写法。但校验拿原文的 2.79 去译文里逐字找，一定找不到，
@@ -2082,6 +2094,34 @@ class Translator:
             return False
         return Translator._num_close_val(want, out)
 
+    @staticmethod
+    def _month_hit(token, src, out):
+        """
+        token 这个数字，是不是「某月」的月份数，并且译文用了英文月份名。
+
+        判据两条：
+          · 原文里这个数字紧跟着「月」（2026年11月16日 里的 11）
+          · 译文里出现该月的英文名（November 或 Nov.，不区分大小写）
+
+        只在两条都成立时放行，所以 11 这个数字在别处（11mm、11 片）
+        照样要被逐字比对 —— 月份是唯一的例外，不是给数字开后门。
+        """
+        out = out or ""
+        if not out or not token.isdigit():
+            return False
+        m = int(token)
+        if not 1 <= m <= 12:
+            return False
+        # 原文里必须是「N月」。前面不能再跟数字，否则 2026 里的 26 也会被当月份
+        if not re.search(r"(?<!\d)" + re.escape(token) + r"\s*月", src or ""):
+            return False
+        for word in _MONTH_WORDS[m - 1]:
+            # 词边界：Nov 不能命中 November 以外的词（novelty），
+            # 结尾的 \.? 收下 Nov. 这种带点的缩写
+            if re.search(r"\b" + word + r"\.?(?![a-z])", out, re.IGNORECASE):
+                return True
+        return False
+
     def _numbers_preserved(self, src, out, dst="zh"):
         """
         原文里的数字必须一个不少地出现在译文里。
@@ -2140,6 +2180,9 @@ class Translator:
                     continue
                 # 同制换写法：2.79米 写成 2790mm 是正确表达，不是算错数
                 if self._unit_equiv_hit(equiv.get(n), out):
+                    continue
+                # 月份换成英文月名：11月 → November，数字本身不该再出现
+                if self._month_hit(n, v, out):
                     continue
                 return False
             return True

@@ -34,6 +34,7 @@ v1.0.8 起，复核不再只是「过 / 不过」的开关，而是流程里的�
 代价是可能把个别位置丢失的、真该翻的字也归进不可译 —— 所以它只做
 「提示并允许跳过」，不静默放行。
 """
+import os
 import re
 
 import pymupdf
@@ -443,6 +444,11 @@ def review_document(doc, marks, dst_lang, untranslated=None,
             if frag in _norm(got):
                 break
         if frag not in _norm(got):
+            if os.environ.get("PT_DEBUG_BLANK"):
+                import sys as _s
+                print("[blank] want=%r got=%r ink=%r"
+                      % (frag, got[:80], m.get("ink") if isinstance(m, dict) else None),
+                      file=_s.stderr)
             rep.add(pno, "blank", expected[:40],
                     "原位没有读回译文，可能是被擦成空白或字太小没写进去",
                     src=src or expected)
