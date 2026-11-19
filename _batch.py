@@ -67,6 +67,10 @@ CASES = [
          src="zh", dst="en", ocr=True,  note="中文转曲 3 页，斜排标注多"),
     dict(key="5_chuwugui",    file="新储物柜示意图2025-12-19.pdf",
          src="zh", dst="en", ocr=True,  note="中文转曲 2 页"),
+    # 无侧板分体托盘：竖排尺寸链（1220/1170/1070 竖着写）+ 引线说明 + 右下角日期，
+    # 正好覆盖竖排与日期两条改动；四页全转曲，必须整页 OCR
+    dict(key="8_tuopan1119",  file="无侧板分体地毯托盘示意图2026-11-19.pdf",
+         src="zh", dst="en", ocr=True,  note="中文转曲 4 页，无侧板分体托盘"),
     dict(key="6_sledbox",     file="SledBox_Drawing 1.pdf",
          src="en", dst="zh", ocr=False, note="英文 1 页，文字层稀疏+大量转曲"),
     dict(key="7_br01",        file="BR-01-Fence-Brace-RevE(2).pdf",
@@ -150,7 +154,10 @@ def run_one(case, cfg):
 def main():
     cfg = guard()
     only = sys.argv[1] if len(sys.argv) > 1 else ""
-    cases = [c for c in CASES if only.lower() in c["key"].lower()] or CASES
+    # 支持逗号分隔跑几份（改公共排版逻辑后要逐份对比 span 数，全量太慢）
+    keys = [k.strip().lower() for k in only.split(",") if k.strip()]
+    cases = [c for c in CASES
+             if not keys or any(k in c["key"].lower() for k in keys)]
 
     results = []
     for i, case in enumerate(cases, 1):

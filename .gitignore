@@ -94,6 +94,13 @@ _stress/
 _batch/
 _survey/
 _ed_bak.json
+# _batch.py 切换发行版时留的临时备份。正常情况下它在 atexit 里被删掉，
+# 但进程被强杀（改逻辑时中断压测）就会留下来 —— 内容没变，但会一直
+# 挂在 git status 里，容易误提交
+_edition_backup.json
+
+# 单份图纸的体检与对比图（原/译上下拼图）
+_bench/
 
 # 竖排效果验证产物（模拟图、对比裁图）
 _vert/

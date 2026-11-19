@@ -870,8 +870,21 @@ def _merge_paragraphs(cands, x_em=0.5, right_em=0.8, gap_em=(-0.4, 2.0)):
         cx = (c["rect"].x0 + c["rect"].x1) / 2
         centered = (prev["rect"].x0 <= cx <= prev["rect"].x1) and not wider
         left_aligned = dx0 <= h * x_em
+        gap_ok = gap_em[0] * h <= gap <= gap_em[1] * h
+        # 行距一致性：同一段里被折开的几行，行距是均匀的。
+        # 只卡「间距 ≤ 2 倍字高」拦不住两组不同的标注 —— 第二组往往居中
+        # 缩进排，会命中上面的 centered 判据。实测托盘图纸右侧：
+        # 组内行距 1.0 / -0.2 / 0.4pt（框紧贴或交叠），两组之间 27.0pt
+        # （1.78 倍字高），没超过 2.0 上限，于是被当成续行并成一句，
+        # 图上读起来成了「红色部分包含边框和内撑」。
+        # 再加一道：本行间距要和段内已有的行距对得上，差超过 0.6 字高
+        # 就是换了一条信息。用相对差而不是绝对阈值，段内行距本身偏大的
+        # 段落不受影响，只有间距突然变大才断。
+        if gap_ok and len(cur) >= 2:
+            base_gap = cur[-1]["rect"].y0 - cur[-2]["rect"].y1
+            gap_ok = abs(gap - base_gap) <= 0.6 * h
         same = ((left_aligned or centered) and not has_colon and not wider
-                and gap_em[0] * h <= gap <= gap_em[1] * h
+                and gap_ok
                 and h_ratio <= 0.20)
         if same:
             cur.append(c)
