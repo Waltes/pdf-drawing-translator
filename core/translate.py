@@ -1621,7 +1621,8 @@ class Translator:
                 "sq. tube, quantity→QTY, maximum→MAX, approximately→approx. Only common nouns may "
                 "be abbreviated — part numbers, material grades and standard codes are copied "
                 "verbatim, never shortened.\n"
-                "10. Output JSON only, no prose.\n"
+                + self._case_rule()
+                + "10. Output JSON only, no prose.\n"
                 "Format: [{\"id\":0,\"text\":\"translation\"}]")
         return (
             "你是资深工程图纸翻译，长期为机械、五金、建材、护栏围栏类图纸做多语种互译。"
@@ -1658,8 +1659,43 @@ class Translator:
             "普通名词按制图习惯缩写：galvanized→galv.、thickness→THK、diameter→DIA、"
             "stainless steel→S.S.、square tube→sq. tube、quantity→QTY、maximum→MAX、"
             "approximately→approx.。缩写只用于普通名词，型号、材料牌号、标准号照抄不缩。\n"
-            "10. 只输出 JSON，不要任何解释文字。\n"
+            + self._case_rule()
+            + "10. 只输出 JSON，不要任何解释文字。\n"
             "输出格式：[{\"id\":0,\"text\":\"译文\"}]")
+
+    def _case_rule(self):
+        """
+        通用版追加的大小写规则。定制版返回空串。
+
+        为什么要在提示词里说而不是靠出口转小写：
+            出口转小写要保护缩写、单位、型号、标准号，规则一多就是把 casing.py
+            那套再写一遍，而且必然误伤（Pvc、dn50 这类）。模型本来就知道哪些
+            是缩写，说一句它就分得开。
+
+        为什么必须说：实测关掉强制大写后，模型在同一页里给了
+            POST SQUARE TUBE 50×50×2.5mm      ← 标注式全大写
+            Yellow part: removable four-corner posts   ← 句子式大小写
+        一份图纸两种风格，比统一大写更难看。它不是不懂规则，是把图号栏那种
+        「全大写标注」当成了默认。
+
+        定制版不追加：那边出口会把整条转成全大写，提示词里再要求小写只是
+        让模型白改一遍，多一步就多一次抖动。
+        """
+        if edition.is_custom():
+            return ""
+        if i18n.is_en():
+            return (
+                "9b. Use normal capitalization in English: capitalize the first letter of a "
+                "sentence and proper nouns, lowercase the rest. Do NOT set whole lines in capitals "
+                "\u2014 this output is not always a shop-floor annotation. Keep acronyms (PVC, HDPE, "
+                "ISO), units (mm, kg, pcs) and part/standard codes (DN50, M8\u00d730, Ra3.2, 4-1/8\") "
+                "exactly as written.\n")
+        return (
+            "9b. 英文按常规书写规则使用大小写：句首字母大写，专有名词大写，"
+            "其余小写。不要整条转成全大写 —— 这是给非制图场合看的译文。"
+            "纯缩写（PVC、HDPE、ISO、PVC-U）、单位（mm、kg、pcs）、"
+            "型号与标准号（DN50、M8×30、Ra3.2、4-1/8\"）保持原写法。\n")
+
     def _edition_rule(self):
         """
         定制版追加到系统提示词的段落：行业标签 + 客户指定的叫法。

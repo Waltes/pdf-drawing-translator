@@ -139,8 +139,7 @@ def apply_style(text, overrides=None):
     按当前发行版套用大小写风格。**译文出口只调这一个函数。**
 
     定制版：全大写 + 单位小写 + 客户指定写法（normalize_case）。
-    通用版：原样返回 —— 一般翻译规则由模型自己保证（句首大写、专有名词大写），
-            这里再动一下就变成「替用户决定风格」了。
+    通用版：把「整条全大写」的降成正常书写，其余原样（plain_case）。
 
     为什么做成统一入口而不是在各出口写 if：
         译文有三条通道（AI / 词典 / 在线免费接口）加一条重译旁路，
@@ -150,8 +149,91 @@ def apply_style(text, overrides=None):
     if not text:
         return text
     if not edition.upper_case():
-        return text
+        return plain_case(text)
     return normalize_case(text, overrides)
+
+
+# 通用版降级时必须保留原样的缩写。只收**公认缩写与材料代号**，
+# 不收普通名词 —— 把 FRAME、TUBE、CAP 收进来等于没降级。
+#
+# 判定失败的方向是安全的：漏收的缩写会被写成小写（hdg → Hdg 难看但读得懂），
+# 收多了则是把普通词留在大写（更难看，而且整条看起来还是全大写）。
+_ACRONYMS = {
+    # 材料与工艺
+    "PVC", "UPVC", "CPVC", "HDPE", "LDPE", "PE", "PP", "ABS", "PU", "POM",
+    "PMMA", "PA", "PC", "EPDM", "NBR", "SUS", "SPCC", "SPHC", "Q235", "Q345",
+    "HDG", "GI", "TIG", "MIG", "CNC", "EDM",
+    # 图纸与工艺用语
+    "QTY", "DIA", "THK", "MAX", "MIN", "TOL", "REF", "TYP", "NTS", "STD",
+    "OD", "ID", "RPM", "EQ", "REV", "DWG", "NO", "ITEM", "SPEC", "MATL",
+    # 标准与规格
+    "ISO", "DIN", "GB", "ANSI", "ASTM", "EN", "JIS", "BS", "SCH", "DN", "PN",
+    "PT", "MT", "UT", "HT",
+    # 管型
+    "RHS", "SHS", "CHS",
+}
+
+
+def _keep_token(core):
+    """这个 token 要不要保持原样（全大写）"""
+    if not core:
+        return True
+    if any(ch.isdigit() for ch in core):
+        return True                    # 型号、标准号、尺寸：DN50、M8×30、Ra3.2
+    key = core.upper()
+    if key in _ACRONYMS:
+        return True
+    # S.S. / C.S. / G.I. 这类点分缩写。
+    # 尾点会被上面的切分剥到 tail 里，留下的 core 是 "S.S"，所以这里允许
+    # 末尾没有点 —— 只按 "S.S." 匹配的话，S.S. 会被降成 "S.s."。
+    if re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]?", core):
+        return True
+    return False
+
+
+def plain_case(text):
+    """
+    把「整条被写成大写」的文本降成正常书写，已经是混合大小写的原样返回。
+
+    只处理占比 > 0.6 的全大写条目。为什么：
+        词表和模型都可能给全大写（图纸标注惯例），但一份图纸里
+        「MATERIAL:」「QTY:」「SURFACE TREATMENT:」与「size: 1118×3050mm」
+        并排时，看起来像两个人写的。降级只对全大写的条目动手，本来
+        正常的句子一个字符都不碰 —— 这一步是「纠正跑偏的」，不是
+        「替模型决定风格」。
+
+    保护三类 token：含数字的（型号/尺寸）、公认缩写（_ACRONYMS）、无字母的。
+    其余转小写，然后把整条的第一个字母大写（句首大写）。
+    """
+    if not text:
+        return text
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return text
+    up = sum(1 for c in letters if c.isupper()) / len(letters)
+    if up <= 0.6:
+        return text                    # 正常书写或本就混合，不动
+
+    parts = re.split(r"(\s+)", text)
+    out = []
+    for part in parts:
+        if not part or part.isspace():
+            out.append(part)
+            continue
+        # 保留首尾标点，只改中间那几个字母
+        m = re.match(r"^([^\w]*)(.*?)([^\w]*)$", part, re.S)
+        lead, core, tail = (m.group(1), m.group(2), m.group(3)) if m else ("", part, "")
+        if core and not _keep_token(core):
+            core = core.lower()
+        out.append(lead + core + tail)
+    got = "".join(out)
+
+    # 句首大写：找第一个字母，把它大写（缩写已全大写，upper() 不动它）
+    for idx, ch in enumerate(got):
+        if ch.isalpha():
+            got = got[:idx] + ch.upper() + got[idx + 1:]
+            break
+    return got
 
 
 def case_report(text, overrides=None):
